@@ -303,10 +303,27 @@ func (c ipams) AssignIP(args AssignIPArgs) error {
 func (c ipams) ReleaseIPs(ips []common.IP) ([]common.IP, error) {
 	glog.V(2).Infof("Releasing IP addresses: %v", ips)
 	unallocated := []common.IP{}
+
+	// Group IP addresses by block to minimize the number of writes
+	// to the datastore required to release the given addresses.
+	ipsByBlock := map[string][]common.IP{}
 	for _, ip := range ips {
+		// Check if we've already got an entry for this block.
 		blockCIDR := getBlockCIDRForAddress(ip)
-		// TODO: Group IP addresses per-block to minimize writes to etcd.
-		unalloc, err := c.releaseIPsFromBlock([]common.IP{ip}, blockCIDR)
+		cidrStr := blockCIDR.String()
+		if _, exists := ipsByBlock[cidrStr]; !exists {
+			// Entry does not exist, create it.
+			ipsByBlock[cidrStr] = []common.IP{}
+		}
+
+		// Append to the list.
+		ipsByBlock[cidrStr] = append(ipsByBlock[cidrStr], ip)
+	}
+
+	// Release IPs for each block.
+	for cidrStr, ips := range ipsByBlock {
+		_, cidr, _ := common.ParseCIDR(cidrStr)
+		unalloc, err := c.releaseIPsFromBlock(ips, *cidr)
 		if err != nil {
 			glog.Errorf("Error releasing IPs: %s", err)
 			return nil, err
@@ -580,22 +597,16 @@ func (c ipams) RemoveIPAMHost(host *string) error {
 	// Determine the hostname to use.
 	hostname := decideHostname(host)
 
-	// Release host affinities.
-	c.ReleaseHostAffinities(&hostname)
-
-	// Remove the host ipam tree.
-	// TODO: Support this in the backend.
-	// key := fmt.Sprintf(ipamHostPath, hostname)
-	// opts := client.DeleteOptions{Recursive: true}
-	// _, err := c.blockReaderWriter.etcd.Delete(context.Background(), key, &opts)
-	// if err != nil {
-	// 	if eerr, ok := err.(client.Error); ok && eerr.Code == client.ErrorCodeNodeExist {
-	// 		// Already deleted.  Carry on.
-
-	// 	} else {
-	// 		return err
-	// 	}
-	// }
+	// Remove the host tree from the datastore.
+	err := c.client.backend.Delete(backend.BlockAffinityKey{Host: hostname})
+	if err != nil {
+		if _, ok := err.(common.ErrorResourceDoesNotExist); ok {
+			// Already deleted - carry on.
+		} else {
+			glog.Errorf("Error removing IPAM host: %s", err)
+			return err
+		}
+	}
 	return nil
 }
 
