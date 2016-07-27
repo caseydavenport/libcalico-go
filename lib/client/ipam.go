@@ -580,22 +580,16 @@ func (c ipams) RemoveIPAMHost(host *string) error {
 	// Determine the hostname to use.
 	hostname := decideHostname(host)
 
-	// Release host affinities.
-	c.ReleaseHostAffinities(&hostname)
-
-	// Remove the host ipam tree.
-	// TODO: Support this in the backend.
-	// key := fmt.Sprintf(ipamHostPath, hostname)
-	// opts := client.DeleteOptions{Recursive: true}
-	// _, err := c.blockReaderWriter.etcd.Delete(context.Background(), key, &opts)
-	// if err != nil {
-	// 	if eerr, ok := err.(client.Error); ok && eerr.Code == client.ErrorCodeNodeExist {
-	// 		// Already deleted.  Carry on.
-
-	// 	} else {
-	// 		return err
-	// 	}
-	// }
+	// Remove the host tree from the datastore.
+	err := c.client.backend.Delete(backend.BlockAffinityKey{Host: hostname})
+	if err != nil {
+		if _, ok := err.(common.ErrorResourceDoesNotExist); ok {
+			// Already deleted - carry on.
+		} else {
+			glog.Errorf("Error removing IPAM host: %s", err)
+			return err
+		}
+	}
 	return nil
 }
 

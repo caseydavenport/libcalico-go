@@ -44,7 +44,19 @@ func (key BlockAffinityKey) asEtcdKey() (string, error) {
 }
 
 func (key BlockAffinityKey) asEtcdDeleteKey() (string, error) {
-	return key.asEtcdKey()
+	// Must specify at least a host to remove.
+	if key.Host == "" {
+		return "", common.ErrorInsufficientIdentifiers{}
+	}
+	k := "/calico/ipam/v2/host/" + key.Host
+
+	// If a cidr is given as well, then limit to just that
+	// block.
+	if key.CIDR.IP != nil {
+		c := strings.Replace(key.CIDR.String(), "/", "-", 1)
+		k = k + fmt.Sprintf("/ipv%d/block/%s", key.CIDR.Version(), c)
+	}
+	return k, nil
 }
 
 func (key BlockAffinityKey) valueType() reflect.Type {
