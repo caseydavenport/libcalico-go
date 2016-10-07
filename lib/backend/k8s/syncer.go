@@ -15,16 +15,16 @@
 package k8s
 
 import (
-	"time"
+	// "time"
 
-	log "github.com/Sirupsen/logrus"
+	// log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
-	"github.com/projectcalico/libcalico-go/lib/backend/model"
-	"github.com/projectcalico/libcalico-go/lib/hwm"
-	"golang.org/x/net/context"
+	// "github.com/projectcalico/libcalico-go/lib/backend/model"
+	// "github.com/projectcalico/libcalico-go/lib/hwm"
+	// "golang.org/x/net/context"
 )
 
-func newSyncer(kc kubeClient, callbacks api.SyncerCallbacks) *kubeSyncer {
+func newSyncer(kc KubeClient, callbacks api.SyncerCallbacks) *kubeSyncer {
 	return &kubeSyncer{
 		callbacks: callbacks,
 	}
