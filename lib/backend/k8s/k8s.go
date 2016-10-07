@@ -21,6 +21,7 @@ import (
 	// log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
+	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	k8sapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/v1"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_4"
@@ -103,6 +104,8 @@ func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
 		return c.listProfiles(l.(model.ProfileListOptions))
 	case model.WorkloadEndpointListOptions:
 		return c.listWorkloadEndpoints(l.(model.WorkloadEndpointListOptions))
+	case model.PoolListOptions:
+		return c.listPools(l.(model.PoolListOptions))
 	default:
 		return nil, goerrors.New("Kubernetes backend does not support 'list' for this type")
 	}
@@ -197,4 +200,33 @@ func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KV
 		return nil, goerrors.New("Pod uses hostNetwork: true")
 	}
 	return c.converter.podToWorkloadEndpoint(pod)
+}
+
+// listPools lists Pools thus the k8s API based on TODO.
+func (c *KubeClient) listPools(l model.PoolListOptions) ([]*model.KVPair, error) {
+	_, poolCidr, err := cnet.ParseCIDR("192.168.0.0/24")
+	if err != nil {
+		return nil, err
+	}
+	kvp, err := c.getPool(model.PoolKey{CIDR: *poolCidr})
+	if err != nil {
+		return nil, err
+	}
+	return []*model.KVPair{kvp}, nil
+}
+
+// getPool gets the Pool from the k8s API based on TODO.
+// TODO: Allow configuration of pools - this currently just returns
+// the pool that was asked for, no matter what.
+func (c *KubeClient) getPool(k model.PoolKey) (*model.KVPair, error) {
+	return &model.KVPair{
+		Key: k,
+		Value: model.Pool{
+			CIDR:          k.CIDR,
+			IPIPInterface: "",
+			Masquerade:    true,
+			IPAM:          true,
+			Disabled:      false,
+		},
+	}, nil
 }
