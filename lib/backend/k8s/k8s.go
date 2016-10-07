@@ -16,36 +16,21 @@ package k8s
 
 import (
 	goerrors "errors"
-	// "reflect"
-	// "strings"
-	"fmt"
-
-	// "time"
-
-	"encoding/json"
+	"strings"
 
 	// log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	k8sapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_4"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	// "github.com/projectcalico/libcalico-go/lib/errors"
-	// "golang.org/x/net/context"
 )
-
-var (
-	policyAnnotation = "net.beta.kubernetes.io/network-policy"
-)
-
-type namespacePolicy struct {
-	Ingress struct {
-		Isolation string `json:"isolation"`
-	} `json:"ingress"`
-}
 
 type KubeClient struct {
 	clientSet *clientset.Clientset
+	converter converter
 }
 
 type KubeConfig struct {
@@ -78,7 +63,7 @@ func (c *KubeClient) Syncer(callbacks api.SyncerCallbacks) api.Syncer {
 
 // Create an entry in the datastore.  This errors if the entry already exists.
 func (c *KubeClient) Create(d *model.KVPair) (*model.KVPair, error) {
-	return nil, nil
+	return nil, goerrors.New("Create is not supported for Kubernetes backend")
 }
 
 // Update an existing entry in the datastore.  This errors if the entry does
@@ -95,12 +80,19 @@ func (c *KubeClient) Apply(d *model.KVPair) (*model.KVPair, error) {
 
 // Delete an entry in the datastore.  This errors if the entry does not exists.
 func (c *KubeClient) Delete(d *model.KVPair) error {
-	return nil
+	return goerrors.New("Delete is not supported for the Kubernetes backend")
 }
 
 // Get an entry from the datastore.  This errors if the entry does not exist.
 func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
-	return nil, nil
+	switch k.(type) {
+	case model.ProfileKey:
+		return c.getProfile(k.(model.ProfileKey))
+	case model.WorkloadEndpointKey:
+		return c.getWorkloadEndpoint(k.(model.WorkloadEndpointKey))
+	default:
+		return nil, goerrors.New("Kubernetes backend does not support 'get' for this type")
+	}
 }
 
 // List entries in the datastore.  This may return an empty list of there are
@@ -108,14 +100,26 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
 	switch l.(type) {
 	case model.ProfileListOptions:
-		return c.listProfiles(l)
+		return c.listProfiles(l.(model.ProfileListOptions))
+	case model.WorkloadEndpointListOptions:
+		return c.listWorkloadEndpoints(l.(model.WorkloadEndpointListOptions))
 	default:
-		return nil, goerrors.New("Kubernetes backend does not support listing this type")
+		return nil, goerrors.New("Kubernetes backend does not support 'list' for this type")
 	}
 }
 
 // listProfiles lists Profiles from the k8s API based on existing Namespaces.
-func (c *KubeClient) listProfiles(l model.ListInterface) ([]*model.KVPair, error) {
+func (c *KubeClient) listProfiles(l model.ProfileListOptions) ([]*model.KVPair, error) {
+	// If a name is specified, then do an exact lookup.
+	if l.Name != "" {
+		kvp, err := c.getProfile(model.ProfileKey{Name: l.Name})
+		if err != nil {
+			return nil, err
+		}
+		return []*model.KVPair{kvp}, nil
+	}
+
+	// Otherwise, enumerate all.
 	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -124,33 +128,73 @@ func (c *KubeClient) listProfiles(l model.ListInterface) ([]*model.KVPair, error
 	// For each Namespace, return a profile.
 	ret := []*model.KVPair{}
 	for _, ns := range namespaces.Items {
-		// Determine the ingress action based off the DefaultDeny annotation.
-		ingressAction := "allow"
-		for k, v := range ns.ObjectMeta.Annotations {
-			if k == policyAnnotation {
-				np := namespacePolicy{}
-				if err := json.Unmarshal([]byte(v), &np); err != nil {
-					return nil, err
-				}
-				if np.Ingress.Isolation == "DefaultDeny" {
-					ingressAction = "deny"
-				}
-			}
+		kvp, err := c.converter.namespaceToProfile(&ns)
+		if err != nil {
+			return nil, err
 		}
-
-		name := fmt.Sprintf("k8s_ns.%s", ns.ObjectMeta.Name)
-		kvp := model.KVPair{
-			Key: model.ProfileKey{Name: name},
-			Value: model.Profile{
-				Rules: model.ProfileRules{
-					InboundRules:  []model.Rule{model.Rule{Action: ingressAction}},
-					OutboundRules: []model.Rule{model.Rule{Action: "allow"}},
-				},
-				Tags:   []string{name},
-				Labels: map[string]string{},
-			},
-		}
-		ret = append(ret, &kvp)
+		ret = append(ret, kvp)
 	}
 	return ret, nil
+}
+
+// getProfile gets the Profile from the k8s API based on existing Namespaces.
+func (c *KubeClient) getProfile(k model.ProfileKey) (*model.KVPair, error) {
+	namespace, err := c.clientSet.Namespaces().Get(k.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.converter.namespaceToProfile(namespace)
+}
+
+// listWorkloadEndpoints lists WorkloadEndpoints from the k8s API based on existing Pods.
+func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) ([]*model.KVPair, error) {
+	// Enumerate all pods in all namespaces.
+	// TODO: Is this the best way to get all pods?
+	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	pods := []v1.Pod{}
+	for _, ns := range namespaces.Items {
+		nsPods, err := c.clientSet.Pods(ns.Name).List(k8sapi.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		pods = append(pods, nsPods.Items...)
+	}
+
+	// For each Pod, return a workload endpoint.
+	ret := []*model.KVPair{}
+	for _, pod := range pods {
+		kvp, err := c.converter.podToWorkloadEndpoint(&pod)
+		if err != nil {
+			return nil, err
+		}
+
+		// Some Pods are invalid - e.g those with hostNetwork.
+		// The conversion func returns these as nil, so just
+		// skip these.
+		if kvp != nil {
+			ret = append(ret, kvp)
+		}
+	}
+	return ret, nil
+}
+
+// getWorkloadEndpoint gets the WorkloadEndpoint from the k8s API based on existing Pods.
+func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KVPair, error) {
+	// The workloadID is of the form namespace.podname.  Parse it so we
+	// can find the correct namespace to get the pod.
+	splits := strings.SplitN(k.WorkloadID, ".", 2)
+	namespace := splits[0]
+	podName := splits[1]
+
+	pod, err := c.clientSet.Pods(namespace).Get(podName)
+	if err != nil {
+		return nil, err
+	} else if pod == nil {
+		return nil, goerrors.New("Pod uses hostNetwork: true")
+	}
+	return c.converter.podToWorkloadEndpoint(pod)
 }
