@@ -16,15 +16,14 @@ package k8s
 
 import (
 	goerrors "errors"
-	"strings"
 
 	// log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	k8sapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/v1"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_4"
+	"k8s.io/kubernetes/pkg/apis/extensions"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	// "github.com/projectcalico/libcalico-go/lib/errors"
 )
@@ -70,13 +69,17 @@ func (c *KubeClient) Create(d *model.KVPair) (*model.KVPair, error) {
 // Update an existing entry in the datastore.  This errors if the entry does
 // not exist.
 func (c *KubeClient) Update(d *model.KVPair) (*model.KVPair, error) {
+	// This is a noop.  Calico components shouldn't be modifying
+	// k8s resources.
 	return nil, nil
 }
 
 // Set an existing entry in the datastore.  This ignores whether an entry already
 // exists.
 func (c *KubeClient) Apply(d *model.KVPair) (*model.KVPair, error) {
-	return nil, nil
+	// This is a noop.  Calico components shouldn't be modifying
+	// k8s resources.
+	return d, nil
 }
 
 // Delete an entry in the datastore.  This errors if the entry does not exists.
@@ -91,6 +94,10 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 		return c.getProfile(k.(model.ProfileKey))
 	case model.WorkloadEndpointKey:
 		return c.getWorkloadEndpoint(k.(model.WorkloadEndpointKey))
+	case model.PoolKey:
+		return c.getPool(k.(model.PoolKey))
+	case model.PolicyKey:
+		return c.getPolicy(k.(model.PolicyKey))
 	default:
 		return nil, goerrors.New("Kubernetes backend does not support 'get' for this type")
 	}
@@ -106,6 +113,8 @@ func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
 		return c.listWorkloadEndpoints(l.(model.WorkloadEndpointListOptions))
 	case model.PoolListOptions:
 		return c.listPools(l.(model.PoolListOptions))
+	case model.PolicyListOptions:
+		return c.listPolicies(l.(model.PolicyListOptions))
 	default:
 		return nil, goerrors.New("Kubernetes backend does not support 'list' for this type")
 	}
@@ -142,7 +151,11 @@ func (c *KubeClient) listProfiles(l model.ProfileListOptions) ([]*model.KVPair, 
 
 // getProfile gets the Profile from the k8s API based on existing Namespaces.
 func (c *KubeClient) getProfile(k model.ProfileKey) (*model.KVPair, error) {
-	namespace, err := c.clientSet.Namespaces().Get(k.Name)
+	if k.Name == "" {
+		return nil, goerrors.New("Missing profile name")
+	}
+	namespaceName := c.converter.parseProfileName(k.Name)
+	namespace, err := c.clientSet.Namespaces().Get(namespaceName)
 	if err != nil {
 		return nil, err
 	}
@@ -152,13 +165,26 @@ func (c *KubeClient) getProfile(k model.ProfileKey) (*model.KVPair, error) {
 
 // listWorkloadEndpoints lists WorkloadEndpoints from the k8s API based on existing Pods.
 func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) ([]*model.KVPair, error) {
-	// Enumerate all pods in all namespaces.
-	// TODO: Is this the best way to get all pods?
+	// If a workload is provided, we can do an exact lookup of this
+	// workload endpoint.
+	if l.WorkloadID != "" {
+		kvp, err := c.getWorkloadEndpoint(model.WorkloadEndpointKey{
+			WorkloadID: l.WorkloadID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return []*model.KVPair{kvp}, nil
+	}
+
+	// Otherwise, enumerate all pods in all namespaces.
+	// We don't yet support hostname, orchestratorID, for the k8s backend.
+	// TODO: Is this the best way to get all pods in all namespaces?
 	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	pods := []v1.Pod{}
+	pods := []k8sapi.Pod{}
 	for _, ns := range namespaces.Items {
 		nsPods, err := c.clientSet.Pods(ns.Name).List(k8sapi.ListOptions{})
 		if err != nil {
@@ -189,9 +215,7 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KVPair, error) {
 	// The workloadID is of the form namespace.podname.  Parse it so we
 	// can find the correct namespace to get the pod.
-	splits := strings.SplitN(k.WorkloadID, ".", 2)
-	namespace := splits[0]
-	podName := splits[1]
+	namespace, podName := c.converter.parseWorkloadID(k.WorkloadID)
 
 	pod, err := c.clientSet.Pods(namespace).Get(podName)
 	if err != nil {
@@ -229,4 +253,56 @@ func (c *KubeClient) getPool(k model.PoolKey) (*model.KVPair, error) {
 			Disabled:      false,
 		},
 	}, nil
+}
+
+// listPolicies lists the Policies from the k8s API based on NetworkPolicy objects.
+func (c *KubeClient) listPolicies(l model.PolicyListOptions) ([]*model.KVPair, error) {
+	if l.Name != "" {
+		// Exact lookup on a NetworkPolicy.
+		kvp, err := c.getPolicy(model.PolicyKey{Name: l.Name})
+		if err != nil {
+			return nil, err
+		}
+		return []*model.KVPair{kvp}, nil
+	}
+
+	// Otherwise, list all NetworkPolicy objects in all Namespaces.
+	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	networkPolicies := []extensions.NetworkPolicy{}
+	for _, ns := range namespaces.Items {
+		namespacePolicies, err := c.clientSet.NetworkPolicies(ns.ObjectMeta.Name).List(k8sapi.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		networkPolicies = append(networkPolicies, namespacePolicies.Items...)
+	}
+
+	// For each policy, turn it into a Policy and generate the list.
+	ret := []*model.KVPair{}
+	for _, p := range networkPolicies {
+		kvp, err := c.converter.networkPolicyToPolicy(&p)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, kvp)
+	}
+
+	return ret, nil
+}
+
+// getPolicy gets the Policy from the k8s API based on NetworkPolicy objects.
+func (c *KubeClient) getPolicy(k model.PolicyKey) (*model.KVPair, error) {
+	if k.Name == "" {
+		return nil, goerrors.New("Missing policy name")
+	}
+	namespace, policyName := c.converter.parsePolicyName(k.Name)
+	networkPolicy, err := c.clientSet.NetworkPolicies(namespace).Get(policyName)
+	if err != nil {
+		return nil, err
+	}
+	return c.converter.networkPolicyToPolicy(networkPolicy)
 }

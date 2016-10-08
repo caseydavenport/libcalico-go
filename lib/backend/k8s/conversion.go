@@ -17,12 +17,19 @@ package k8s
 import (
 	"fmt"
 	"net"
+	"strings"
 
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
-	"k8s.io/kubernetes/pkg/api/v1"
+	"github.com/projectcalico/libcalico-go/lib/numorstring"
+	k8sapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 var (
@@ -38,7 +45,28 @@ type namespacePolicy struct {
 type converter struct {
 }
 
-func (c converter) namespaceToProfile(ns *v1.Namespace) (*model.KVPair, error) {
+// parseWorkloadID extracts the Namespace and Pod name from the given workload ID.
+func (c converter) parseWorkloadID(workloadID string) (string, string) {
+	splits := strings.SplitN(workloadID, ".", 2)
+	return splits[0], splits[1]
+}
+
+// parsePolicyName extracts the Namespace and NetworkPolicy name from the given Policy name.
+func (c converter) parsePolicyName(name string) (string, string) {
+	splits := strings.SplitN(name, ".", 2)
+	if len(splits) != 2 {
+		return "", ""
+	}
+	return splits[0], splits[1]
+}
+
+// parseProfileName extracts the Namespace name from the given Profile name.
+func (c converter) parseProfileName(profileName string) string {
+	splits := strings.SplitN(profileName, ".", 2)
+	return splits[1]
+}
+
+func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, error) {
 	// Determine the ingress action based off the DefaultDeny annotation.
 	ingressAction := "allow"
 	for k, v := range ns.ObjectMeta.Annotations {
@@ -53,6 +81,12 @@ func (c converter) namespaceToProfile(ns *v1.Namespace) (*model.KVPair, error) {
 		}
 	}
 
+	// Generate the labels to apply to the profile.
+	labels := map[string]string{}
+	for k, v := range ns.ObjectMeta.Labels {
+		labels[fmt.Sprintf("k8s_ns/label/%s", k)] = v
+	}
+
 	name := fmt.Sprintf("k8s_ns.%s", ns.ObjectMeta.Name)
 	kvp := model.KVPair{
 		Key: model.ProfileKey{Name: name},
@@ -62,16 +96,16 @@ func (c converter) namespaceToProfile(ns *v1.Namespace) (*model.KVPair, error) {
 				OutboundRules: []model.Rule{model.Rule{Action: "allow"}},
 			},
 			Tags:   []string{name},
-			Labels: map[string]string{},
+			Labels: labels,
 		},
 	}
 	return &kvp, nil
 }
 
-func (c converter) podToWorkloadEndpoint(pod *v1.Pod) (*model.KVPair, error) {
+func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error) {
 	// If the pod is in host networking, we want nothing to do with it.
 	// Return nil to indicate there is no corresponding workload endpoint.
-	if pod.Spec.HostNetwork == true {
+	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.HostNetwork == true {
 		return nil, nil
 	}
 
@@ -94,6 +128,11 @@ func (c converter) podToWorkloadEndpoint(pod *v1.Pod) (*model.KVPair, error) {
 		return nil, err
 	}
 
+	// Generate the interface name based on identifiers.
+	h := sha1.New()
+	h.Write([]byte(workload))
+	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[0:12])
+
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
 		Key: model.WorkloadEndpointKey{
@@ -104,7 +143,7 @@ func (c converter) podToWorkloadEndpoint(pod *v1.Pod) (*model.KVPair, error) {
 		},
 		Value: model.WorkloadEndpoint{
 			State:      "active",
-			Name:       "eth0",
+			Name:       interfaceName,
 			Mac:        cnet.MAC{HardwareAddr: mac},
 			ProfileIDs: []string{profile},
 			IPv4Nets:   ipNets,
@@ -113,4 +152,156 @@ func (c converter) podToWorkloadEndpoint(pod *v1.Pod) (*model.KVPair, error) {
 		},
 	}
 	return &kvp, nil
+}
+
+// networkPolicyToPolicy converts a k8s NetworkPolicy to a model.KVPair.
+func (c converter) networkPolicyToPolicy(np *extensions.NetworkPolicy) (*model.KVPair, error) {
+	// Parse out important fields.
+	policyName := fmt.Sprintf("%s.%s", np.ObjectMeta.Namespace, np.ObjectMeta.Name)
+	order := float64(1000.0)
+
+	// Generate the inbound rules list.
+	inboundRules := []model.Rule{}
+	for _, r := range np.Spec.Ingress {
+		inboundRules = append(inboundRules, c.parseIngressRule(r, np.ObjectMeta.Namespace)...)
+	}
+
+	// Build and return the KVPair.
+	return &model.KVPair{
+		Key: model.PolicyKey{
+			Name: policyName,
+			Tier: "k8s-network-policy",
+		},
+		Value: model.Policy{
+			Order:         &order,
+			Selector:      c.parseSelector(&np.Spec.PodSelector, &np.ObjectMeta.Namespace),
+			InboundRules:  inboundRules,
+			OutboundRules: []model.Rule{},
+		},
+	}, nil
+}
+
+// parseSelector takes a namespaced k8s label selector and returns the Calico
+// equivalent.
+func (c converter) parseSelector(s *unversioned.LabelSelector, ns *string) string {
+	// If this is a podSelector, it needs to be namespaced, and it
+	// uses a different prefix.  Otherwise, treat this as a NamespaceSelector.
+	selectors := []string{}
+	prefix := "k8s_ns/label/"
+	if ns != nil {
+		prefix = ""
+		selectors = append(selectors, fmt.Sprintf("calico/k8s_ns == '%s'", *ns))
+	}
+
+	// matchLabels is a map key => value, it means match if (label[key] ==
+	// value) for all keys.
+	for k, v := range s.MatchLabels {
+		selectors = append(selectors, fmt.Sprintf("%s%s == '%s'", prefix, k, v))
+	}
+
+	// matchExpressions is a list of in/notin/exists/doesnotexist tests.
+	for _, e := range s.MatchExpressions {
+		valueList := strings.Join(e.Values, ", ")
+
+		// Each selector is formatted differently based on the operator.
+		switch e.Operator {
+		case unversioned.LabelSelectorOpIn:
+			selectors = append(selectors, fmt.Sprintf("%s%s in { %s }", prefix, e.Key, valueList))
+		case unversioned.LabelSelectorOpNotIn:
+			selectors = append(selectors, fmt.Sprintf("%s%s no int { %s }", prefix, e.Key, valueList))
+		case unversioned.LabelSelectorOpExists:
+			selectors = append(selectors, fmt.Sprintf("has(%s%s)", prefix, e.Key))
+		case unversioned.LabelSelectorOpDoesNotExist:
+			selectors = append(selectors, fmt.Sprintf("! has(%s%s)", prefix, e.Key))
+		}
+	}
+
+	return strings.Join(selectors, " && ")
+}
+
+func (c converter) parseIngressRule(r extensions.NetworkPolicyIngressRule, ns string) []model.Rule {
+	rules := []model.Rule{}
+	peers := []*extensions.NetworkPolicyPeer{}
+	ports := []*extensions.NetworkPolicyPort{}
+
+	// Built up a list of the sources and a list of the desintations.
+	for _, f := range r.From {
+		peers = append(peers, &f)
+	}
+	for _, p := range r.Ports {
+		ports = append(ports, &p)
+	}
+
+	// If there no peers, or no ports, represent that as nil.
+	if len(peers) == 0 {
+		peers = []*extensions.NetworkPolicyPeer{nil}
+	}
+	if len(ports) == 0 {
+		ports = []*extensions.NetworkPolicyPort{nil}
+	}
+
+	// Combine desintations with sources to generate rules.
+	for _, port := range ports {
+		for _, peer := range peers {
+			// Build rule and append to list.
+			rules = append(rules, c.buildRule(port, peer, ns))
+		}
+	}
+	return rules
+}
+
+func (c converter) buildRule(port *extensions.NetworkPolicyPort, peer *extensions.NetworkPolicyPeer, ns string) model.Rule {
+	var protocol *numorstring.Protocol
+	dstPorts := []numorstring.Port{}
+	srcSelector := ""
+	if port != nil {
+		// Port information available.
+		protocol = c.parseProtocol(port.Protocol)
+		dstPorts = c.parsePolicyPort(*port)
+	}
+	if peer != nil {
+		// Peer information available.
+		srcSelector = c.parsePolicyPeer(*peer, ns)
+	}
+
+	// Build the rule.
+	return model.Rule{
+		Action:      "allow",
+		Protocol:    protocol,
+		SrcSelector: srcSelector,
+		DstPorts:    dstPorts,
+	}
+}
+
+func (c converter) parseProtocol(protocol *k8sapi.Protocol) *numorstring.Protocol {
+	if protocol != nil {
+		p := numorstring.ProtocolFromString(strings.ToLower(string(*protocol)))
+		return &p
+	}
+	return nil
+}
+
+func (c converter) parsePolicyPeer(peer extensions.NetworkPolicyPeer, ns string) string {
+	// Determine the source selector for the rule.
+	// Only one of PodSelector / NamespaceSelector can be defined.
+	if peer.PodSelector != nil {
+		return c.parseSelector(peer.PodSelector, &ns)
+	}
+	if peer.NamespaceSelector != nil {
+		return c.parseSelector(peer.NamespaceSelector, nil)
+	}
+
+	// Neither is defined - return an empty selector.
+	return ""
+}
+
+func (c converter) parsePolicyPort(port extensions.NetworkPolicyPort) []numorstring.Port {
+	if port.Port != nil && port.Port.Type == intstr.Int {
+		return []numorstring.Port{numorstring.PortFromInt(port.Port.IntVal)}
+	} else if port.Port != nil && port.Port.Type == intstr.String {
+		return []numorstring.Port{numorstring.PortFromString(port.Port.StrVal)}
+	}
+
+	// No ports - return empty list.
+	return []numorstring.Port{}
 }

@@ -19,7 +19,7 @@ test: ut
 
 # Use this to populate the vendor directory after checking out the repository.
 # To update upstream dependencies, delete the glide.lock file first.
-vendor vendor/.up-to-date: glide.lock
+vendor vendor/.up-to-date: 
 	rm -f vendor/.up-to-date
 	glide install -strip-vendor -strip-vcs --cache
 	touch vendor/.up-to-date
