@@ -15,26 +15,52 @@
 package k8s
 
 import (
-	// "time"
+	"fmt"
 
-	// log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
-	// "github.com/projectcalico/libcalico-go/lib/backend/model"
-	// "github.com/projectcalico/libcalico-go/lib/hwm"
-	// "golang.org/x/net/context"
+	"github.com/projectcalico/libcalico-go/lib/backend/model"
+	k8sapi "k8s.io/kubernetes/pkg/api"
 )
 
 func newSyncer(kc KubeClient, callbacks api.SyncerCallbacks) *kubeSyncer {
 	return &kubeSyncer{
+		kc:        kc,
 		callbacks: callbacks,
 	}
 }
 
 type kubeSyncer struct {
+	kc        KubeClient
 	callbacks api.SyncerCallbacks
 	OneShot   bool
 }
 
 func (syn *kubeSyncer) Start() {
+	c := make(chan model.KVPair)
+	go syn.watchNamespaces(c)
+	for x := range c {
+		fmt.Printf("Recieved KVPAIR: %+v", x)
+	}
+}
 
+func (syn *kubeSyncer) watchNamespaces(c chan model.KVPair) {
+	nsWatch, err := syn.kc.clientSet.Namespaces().Watch(k8sapi.ListOptions{})
+	if err != nil {
+		panic(err)
+	}
+	resultChan := nsWatch.ResultChan()
+	for e := range resultChan {
+		fmt.Printf("Recieved update.  Type=%s\n", e.Type)
+		ns, ok := e.Object.(*k8sapi.Namespace)
+		if !ok {
+			panic(ok)
+		}
+		fmt.Printf("Received update.  Object: %+v\n", *ns)
+		c <- model.KVPair{
+			Key: model.PolicyKey{
+				Name: ns.ObjectMeta.Name,
+			},
+			Value: model.Policy{},
+		}
+	}
 }

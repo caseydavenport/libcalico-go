@@ -25,7 +25,6 @@ import (
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	// "github.com/projectcalico/libcalico-go/lib/errors"
 )
 
 type KubeClient struct {
@@ -47,7 +46,6 @@ func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	//logger.Debugf("Kubernetes config %v", config)
 
 	// Create the clientset
 	cs, err := clientset.NewForConfig(config)
@@ -221,7 +219,7 @@ func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KV
 	if err != nil {
 		return nil, err
 	} else if pod == nil {
-		return nil, goerrors.New("Pod uses hostNetwork: true")
+		return nil, goerrors.New("No such pod, or hostNetwork=true")
 	}
 	return c.converter.podToWorkloadEndpoint(pod)
 }
