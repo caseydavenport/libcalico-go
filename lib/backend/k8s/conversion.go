@@ -15,6 +15,7 @@
 package k8s
 
 import (
+	goerrors "errors"
 	"fmt"
 	"net"
 	"strings"
@@ -61,9 +62,12 @@ func (c converter) parsePolicyName(name string) (string, string) {
 }
 
 // parseProfileName extracts the Namespace name from the given Profile name.
-func (c converter) parseProfileName(profileName string) string {
+func (c converter) parseProfileName(profileName string) (string, error) {
 	splits := strings.SplitN(profileName, ".", 2)
-	return splits[1]
+	if len(splits) != 2 {
+		return "", goerrors.New(fmt.Sprintf("Invalid profile name: %s", profileName))
+	}
+	return splits[1], nil
 }
 
 func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, error) {

@@ -32,15 +32,38 @@ type KubeClient struct {
 }
 
 type KubeConfig struct {
+	KubeconfigFile       string `json:"kubeconfig" envconfig:"KUBECONFIG" default:"./kubeconfig"`
+	Server               string `json:"server" envconfig:"K8S_API" default:""`
+	ClientCertificate    string `json:"clientCertificate" envconfig:"K8S_CERT_FILE" default:""`
+	ClientKey            string `json:"clientKey" envconfig:"K8S_KEY_FILE" default:""`
+	CertificateAuthority string `json:"certificateAuthority" envconfig:"K8S_CA_FILE" default:""`
+	Token                string `json:"token" envconfig:"K8S_API_TOKEN" default:""`
 }
 
 func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 
 	// Use the kubernetes client code to load the kubeconfig file and combine it with the overrides.
-	// TODO: This needs to be configurable, not just using my hardcoded kubeconfig file.
 	configOverrides := &clientcmd.ConfigOverrides{}
+	var overridesMap = []struct {
+		variable *string
+		value    string
+	}{
+		{&configOverrides.ClusterInfo.Server, kc.Server},
+		{&configOverrides.AuthInfo.ClientCertificate, kc.ClientCertificate},
+		{&configOverrides.AuthInfo.ClientKey, kc.ClientKey},
+		{&configOverrides.ClusterInfo.CertificateAuthority, kc.CertificateAuthority},
+		{&configOverrides.AuthInfo.Token, kc.Token},
+	}
+
+	// Using the override map above, populate any non-empty values.
+	for _, override := range overridesMap {
+		if override.value != "" {
+			*override.variable = override.value
+		}
+	}
+
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: "/Users/casey/.kube/config"},
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kc.KubeconfigFile},
 		configOverrides).ClientConfig()
 	if err != nil {
 		return nil, err
@@ -151,7 +174,10 @@ func (c *KubeClient) getProfile(k model.ProfileKey) (*model.KVPair, error) {
 	if k.Name == "" {
 		return nil, goerrors.New("Missing profile name")
 	}
-	namespaceName := c.converter.parseProfileName(k.Name)
+	namespaceName, err := c.converter.parseProfileName(k.Name)
+	if err != nil {
+		return nil, err
+	}
 	namespace, err := c.clientSet.Namespaces().Get(namespaceName)
 	if err != nil {
 		return nil, err
