@@ -177,18 +177,10 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 
 	// Otherwise, enumerate all pods in all namespaces.
 	// We don't yet support hostname, orchestratorID, for the k8s backend.
-	// TODO: Is this the best way to get all pods in all namespaces?
-	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
+	pods := []k8sapi.Pod{}
+	pods, err := c.clientSet.Pods("").List(k8sapi.ListOptions{})
 	if err != nil {
 		return nil, err
-	}
-	pods := []k8sapi.Pod{}
-	for _, ns := range namespaces.Items {
-		nsPods, err := c.clientSet.Pods(ns.Name).List(k8sapi.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		pods = append(pods, nsPods.Items...)
 	}
 
 	// For each Pod, return a workload endpoint.
@@ -265,18 +257,9 @@ func (c *KubeClient) listPolicies(l model.PolicyListOptions) ([]*model.KVPair, e
 	}
 
 	// Otherwise, list all NetworkPolicy objects in all Namespaces.
-	namespaces, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
+	networkPolicies, err := c.clientSet.NetworkPolicies("").List(k8sapi.ListOptions{})
 	if err != nil {
 		return nil, err
-	}
-
-	networkPolicies := []extensions.NetworkPolicy{}
-	for _, ns := range namespaces.Items {
-		namespacePolicies, err := c.clientSet.NetworkPolicies(ns.ObjectMeta.Name).List(k8sapi.ListOptions{})
-		if err != nil {
-			return nil, err
-		}
-		networkPolicies = append(networkPolicies, namespacePolicies.Items...)
 	}
 
 	// For each policy, turn it into a Policy and generate the list.
