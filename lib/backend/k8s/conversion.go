@@ -140,15 +140,20 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	profile := fmt.Sprintf("k8s_ns.%s", pod.ObjectMeta.Namespace)
 	workload := fmt.Sprintf("%s.%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 
+	// Check to see if the Pod has been scheduled yet.
+	if pod.Status.PodIP == "" {
+		// Not yet scheduled - ignore this workload.
+		return nil, nil
+	}
+
 	// Parse the pod's IP address, MAC.
 	ipNets := []cnet.IPNet{}
-	_, ipNet, err := cnet.ParseCIDR(pod.Status.PodIP)
-	if err == nil {
-		// We parsed the IP address - add it to the ipNets slice.
-		// If parsing failed, then this pod likely hasn't been
-		// scheduled yet.
-		ipNets = append(ipNets, *ipNet)
+	_, ipNet, err := cnet.ParseCIDR(fmt.Sprintf("%s/32", pod.Status.PodIP))
+	if err != nil {
+		return nil, err
 	}
+	ipNets = append(ipNets, *ipNet)
+
 	// TODO: Get the real mac from somewhere?
 	mac, err := net.ParseMAC("ff:ff:ff:ff:ff:ff")
 	if err != nil {
