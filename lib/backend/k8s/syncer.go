@@ -20,7 +20,6 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	k8sapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/watch"
 )
 
