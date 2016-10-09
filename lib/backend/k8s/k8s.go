@@ -22,7 +22,6 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	k8sapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 )
@@ -177,7 +176,6 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 
 	// Otherwise, enumerate all pods in all namespaces.
 	// We don't yet support hostname, orchestratorID, for the k8s backend.
-	pods := []k8sapi.Pod{}
 	pods, err := c.clientSet.Pods("").List(k8sapi.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -185,7 +183,7 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 
 	// For each Pod, return a workload endpoint.
 	ret := []*model.KVPair{}
-	for _, pod := range pods {
+	for _, pod := range pods.Items {
 		kvp, err := c.converter.podToWorkloadEndpoint(&pod)
 		if err != nil {
 			return nil, err
@@ -264,7 +262,7 @@ func (c *KubeClient) listPolicies(l model.PolicyListOptions) ([]*model.KVPair, e
 
 	// For each policy, turn it into a Policy and generate the list.
 	ret := []*model.KVPair{}
-	for _, p := range networkPolicies {
+	for _, p := range networkPolicies.Items {
 		kvp, err := c.converter.networkPolicyToPolicy(&p)
 		if err != nil {
 			return nil, err
