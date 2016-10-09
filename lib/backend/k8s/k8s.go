@@ -201,7 +201,12 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 			WorkloadID: l.WorkloadID,
 		})
 		if err != nil {
+			// Error getting the endpoint.
 			return nil, err
+		}
+		if kvp == nil {
+			// The workload endpoint doesn't exist.
+			return nil, nil
 		}
 		return []*model.KVPair{kvp}, nil
 	}
