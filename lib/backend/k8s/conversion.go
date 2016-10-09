@@ -98,6 +98,7 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 			Tags:   []string{name},
 			Labels: labels,
 		},
+		Revision: ns.ObjectMeta.ResourceVersion,
 	}
 	return &kvp, nil
 }
@@ -150,6 +151,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 			IPv6Nets:   []cnet.IPNet{},
 			Labels:     pod.ObjectMeta.Labels,
 		},
+		Revision: pod.ObjectMeta.ResourceVersion,
 	}
 	return &kvp, nil
 }
@@ -178,6 +180,7 @@ func (c converter) networkPolicyToPolicy(np *extensions.NetworkPolicy) (*model.K
 			InboundRules:  inboundRules,
 			OutboundRules: []model.Rule{},
 		},
+		Revision: np.ObjectMeta.ResourceVersion,
 	}, nil
 }
 
