@@ -44,9 +44,6 @@ type resourceVersions struct {
 }
 
 func (syn *kubeSyncer) Start() {
-	// Start the syncer in sync mode.
-	syn.callbacks.OnStatusUpdated(api.ResyncInProgress)
-
 	// Channel for receiving updates from a snapshot.
 	snapshotUpdates := make(chan *model.KVPair)
 
@@ -77,6 +74,8 @@ func (syn *kubeSyncer) Start() {
 
 // TODO: Make this smarter!
 func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KVPair) {
+
+	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
 	var sUpdate, wUpdate *model.KVPair
 	for {
 		select {
@@ -92,10 +91,75 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 	resyncChan chan *resourceVersions, initialVersionChan chan *resourceVersions) {
 
 	log.Info("Starting readSnapshot worker")
-
-	// TODO: Actually need to create an initial snapshot!
+	// Perform an initial snapshot, and send the latest versions to the
+	// watcher routine.
 	initialVersions := resourceVersions{}
+	snap := syn.performSnapshot(&initialVersions)
+	for _, u := range snap {
+		// TODO: We're looping over this snapshot a lot.
+		updateChan <- u
+	}
+	syn.callbacks.OnStatusUpdated(api.InSync)
 	initialVersionChan <- &initialVersions
+
+	for {
+		// Wait for an event on the resync request channel.
+		newVersions := <-resyncChan
+
+		// We've received an event - perform a resync.
+		snap = syn.performSnapshot(newVersions)
+		for _, u := range snap {
+			// TODO: We're looping over this snapshot a lot.
+			updateChan <- u
+		}
+		syn.callbacks.OnStatusUpdated(api.InSync)
+		// TODO: Send new resource versions back to watcher thread.
+	}
+}
+
+func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPair {
+	snap := []*model.KVPair{}
+	syn.callbacks.OnStatusUpdated(api.ResyncInProgress)
+	opts := k8sapi.ListOptions{}
+
+	// Get Namespaces (Profiles)
+	log.Info("Syncing Namespaces")
+	nsList, _ := syn.kc.clientSet.Namespaces().List(opts)
+	versions.namespaceVersion = nsList.ListMeta.ResourceVersion
+	for _, ns := range nsList.Items {
+		prof, _ := syn.kc.converter.namespaceToProfile(&ns)
+		snap = append(snap, prof)
+
+		// If this is the kube-system Namespace, also send
+		// the pool through. // TODO: Hacky.
+		if ns.ObjectMeta.Name == "kube-system" {
+			pool, _ := syn.kc.converter.namespaceToPool(&ns)
+			snap = append(snap, pool)
+		}
+	}
+
+	// Get NetworkPolicies (Policies)
+	log.Info("Syncing NetworkPolicy")
+	npList, _ := syn.kc.clientSet.NetworkPolicies("").List(opts)
+	versions.networkPolicyVersion = npList.ListMeta.ResourceVersion
+	for _, np := range npList.Items {
+		pol, _ := syn.kc.converter.networkPolicyToPolicy(&np)
+		snap = append(snap, pol)
+	}
+
+	// Get Pods (WorkloadEndpoints)
+	log.Info("Syncing Pods")
+	poList, _ := syn.kc.clientSet.Pods("").List(opts)
+	versions.podVersion = poList.ListMeta.ResourceVersion
+	for _, po := range poList.Items {
+		wep, _ := syn.kc.converter.podToWorkloadEndpoint(&po)
+		if wep != nil {
+			snap = append(snap, wep)
+		}
+	}
+
+	log.Infof("Snapshot resourceVersions: %+v", versions)
+	return snap
 }
 
 // TODO: Handle case where we fall behind, trigger another snapshot.
@@ -107,6 +171,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 
 	// Wait for the initial resourceVersions to watch for.
 	initialVersions := <-initialVersionSource
+	log.Infof("Received initialVersions: %+v", initialVersions)
 
 	// Get watch channels for each resource.
 	opts := k8sapi.ListOptions{
