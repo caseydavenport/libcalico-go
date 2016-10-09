@@ -134,11 +134,11 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	poChan := poWatch.ResultChan()
 	npChan := npWatch.ResultChan()
 	var ns, po, np watch.Event
-	var kvp *model.KVPair
+	var kvp, poolKVP *model.KVPair
 	for {
 		select {
 		case ns = <-nsChan:
-			kvp = syn.parseNamespaceEvent(ns)
+			kvp, poolKVP = syn.parseNamespaceEvent(ns)
 			latestVersions.namespaceVersion = kvp.Revision.(string)
 		case po = <-poChan:
 			kvp = syn.parsePodEvent(po)
@@ -156,10 +156,15 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			// Send the KVPair to the update channel.
 			updateChan <- kvp
 		}
+
+		// If there was a pool update, send that as well.
+		if poolKVP != nil {
+			updateChan <- poolKVP
+		}
 	}
 }
 
-func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) *model.KVPair {
+func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) (*model.KVPair, *model.KVPair) {
 	ns, ok := e.Object.(*k8sapi.Namespace)
 	if !ok {
 		panic(ok)
@@ -171,11 +176,21 @@ func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) *model.KVPair {
 		panic(err)
 	}
 
+	// If this is the kube-system Namespace, it also houses Pool
+	// information, so send a pool update. FIXME: Make this better.
+	var poolKVP *model.KVPair
+	if ns.ObjectMeta.Name == "kube-system" {
+		poolKVP, err = syn.kc.converter.namespaceToPool(ns)
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	// For deletes, we need to nil out the Value part of the KVPair.
 	if e.Type == watch.Deleted {
 		kvp.Value = nil
 	}
-	return kvp
+	return kvp, poolKVP
 }
 
 func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {

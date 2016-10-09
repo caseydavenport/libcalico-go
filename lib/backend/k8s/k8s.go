@@ -15,12 +15,12 @@
 package k8s
 
 import (
+	"encoding/json"
 	goerrors "errors"
 
-	// log "github.com/Sirupsen/logrus"
+	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
-	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	k8sapi "k8s.io/kubernetes/pkg/api"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
@@ -91,7 +91,8 @@ func (c *KubeClient) Create(d *model.KVPair) (*model.KVPair, error) {
 func (c *KubeClient) Update(d *model.KVPair) (*model.KVPair, error) {
 	// This is a noop.  Calico components shouldn't be modifying
 	// k8s resources.
-	return nil, nil
+	log.Infof("Kubernetes backend received 'Update' - do nothing.")
+	return d, nil
 }
 
 // Set an existing entry in the datastore.  This ignores whether an entry already
@@ -99,6 +100,11 @@ func (c *KubeClient) Update(d *model.KVPair) (*model.KVPair, error) {
 func (c *KubeClient) Apply(d *model.KVPair) (*model.KVPair, error) {
 	// This is a noop.  Calico components shouldn't be modifying
 	// k8s resources.
+	switch d.Key.(type) {
+	case model.PoolKey:
+		return c.applyPool(d)
+	}
+	log.Infof("Kubernetes backend received 'Apply' for unsupported object - do nothing.")
 	return d, nil
 }
 
@@ -240,33 +246,52 @@ func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KV
 	return c.converter.podToWorkloadEndpoint(pod)
 }
 
-// listPools lists Pools thus the k8s API based on TODO.
+// listPools lists Pools thus the k8s API based on kube-system Namespace annotations.
 func (c *KubeClient) listPools(l model.PoolListOptions) ([]*model.KVPair, error) {
-	_, poolCidr, err := cnet.ParseCIDR("192.168.0.0/24")
-	if err != nil {
-		return nil, err
-	}
-	kvp, err := c.getPool(model.PoolKey{CIDR: *poolCidr})
+	// Kubernetes backend only supports a single pool.
+	kvp, err := c.getPool(model.PoolKey{})
 	if err != nil {
 		return nil, err
 	}
 	return []*model.KVPair{kvp}, nil
 }
 
-// getPool gets the Pool from the k8s API based on TODO.
-// TODO: Allow configuration of pools - this currently just returns
-// the pool that was asked for, no matter what.
+// getPool gets the Pool from the k8s API based on kube-system Namespace annotations.
 func (c *KubeClient) getPool(k model.PoolKey) (*model.KVPair, error) {
-	return &model.KVPair{
-		Key: k,
-		Value: model.Pool{
-			CIDR:          k.CIDR,
-			IPIPInterface: "",
-			Masquerade:    true,
-			IPAM:          true,
-			Disabled:      false,
-		},
-	}, nil
+	ns, err := c.clientSet.Namespaces().Get("kube-system")
+	if err != nil {
+		return nil, err
+	}
+	return c.converter.namespaceToPool(ns)
+}
+
+// The Kubernetes backend only supports a single pool, which is stored
+// as an annotation on the Kubernetes kube-system Namespace.
+func (c *KubeClient) applyPool(kvp *model.KVPair) (*model.KVPair, error) {
+	ns, err := c.clientSet.Namespaces().Get("kube-system")
+	if err != nil {
+		return nil, err
+	}
+
+	// Serialize the pool.
+	k := "projectcalico.org/ipPool"
+	bytes, err := json.Marshal(kvp.Value)
+	if err != nil {
+		return nil, err
+	}
+	value := string(bytes)
+
+	// Store the pool.
+	if ns.ObjectMeta.Annotations == nil {
+		ns.ObjectMeta.Annotations = map[string]string{}
+	}
+	ns.ObjectMeta.Annotations[k] = value
+	updated, err := c.clientSet.Namespaces().Update(ns)
+	if err != nil {
+		return nil, err
+	}
+	kvp.Revision = updated.ObjectMeta.ResourceVersion
+	return kvp, nil
 }
 
 // listPolicies lists the Policies from the k8s API based on NetworkPolicy objects.
