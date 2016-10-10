@@ -121,7 +121,7 @@ func (c *KubeClient) Delete(d *model.KVPair) error {
 
 // Get an entry from the datastore.  This errors if the entry does not exist.
 func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
-	log.Debug("Received 'Get' request for %+v", k)
+	log.Debugf("Received 'Get' request for %+v", k)
 	switch k.(type) {
 	case model.ProfileKey:
 		return c.getProfile(k.(model.ProfileKey))
@@ -139,7 +139,7 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 // List entries in the datastore.  This may return an empty list of there are
 // no entries matching the request in the ListInterface.
 func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
-	log.Debug("Received 'List' request for %+v", l)
+	log.Debugf("Received 'List' request for %+v", l)
 	switch l.(type) {
 	case model.ProfileListOptions:
 		return c.listProfiles(l.(model.ProfileListOptions))
