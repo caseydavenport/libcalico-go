@@ -161,7 +161,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	// Generate the interface name based on identifiers.
 	h := sha1.New()
 	h.Write([]byte(workload))
-	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[0:12])
+	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
 
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
