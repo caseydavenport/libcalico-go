@@ -17,6 +17,7 @@ package k8s
 import (
 	"encoding/json"
 	goerrors "errors"
+	"fmt"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
@@ -43,6 +44,7 @@ type KubeConfig struct {
 func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 
 	// Use the kubernetes client code to load the kubeconfig file and combine it with the overrides.
+	log.Infof("Building client for config: %+v", kc)
 	configOverrides := &clientcmd.ConfigOverrides{}
 	var overridesMap = []struct {
 		variable *string
@@ -61,6 +63,7 @@ func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 			*override.variable = override.value
 		}
 	}
+	log.Infof("Config overrides: %+v", configOverrides)
 
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kc.KubeconfigFile},
@@ -74,6 +77,7 @@ func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Debugf("Created k8s clientSet: %+v", cs)
 	return &KubeClient{clientSet: cs}, nil
 }
 
@@ -83,6 +87,7 @@ func (c *KubeClient) Syncer(callbacks api.SyncerCallbacks) api.Syncer {
 
 // Create an entry in the datastore.  This errors if the entry already exists.
 func (c *KubeClient) Create(d *model.KVPair) (*model.KVPair, error) {
+	log.Warn("Attempt to 'Create' using kubernetes backend is not supported.")
 	return nil, goerrors.New("Create is not supported for Kubernetes backend")
 }
 
@@ -91,7 +96,7 @@ func (c *KubeClient) Create(d *model.KVPair) (*model.KVPair, error) {
 func (c *KubeClient) Update(d *model.KVPair) (*model.KVPair, error) {
 	// This is a noop.  Calico components shouldn't be modifying
 	// k8s resources.
-	log.Infof("Kubernetes backend received 'Update' - do nothing.")
+	log.Infof("Kubernetes backend received 'Update' for %+v - do nothing.", d.Key)
 	return d, nil
 }
 
@@ -104,17 +109,19 @@ func (c *KubeClient) Apply(d *model.KVPair) (*model.KVPair, error) {
 	case model.PoolKey:
 		return c.applyPool(d)
 	}
-	log.Infof("Kubernetes backend received 'Apply' for unsupported object - do nothing.")
+	log.Infof("Ignoring 'Apply' for %s", d.Key)
 	return d, nil
 }
 
-// Delete an entry in the datastore.  This errors if the entry does not exists.
+// Delete an entry in the datastore. This is a no-op when using the k8s backend.
 func (c *KubeClient) Delete(d *model.KVPair) error {
-	return goerrors.New("Delete is not supported for the Kubernetes backend")
+	log.Warn("Attempt to 'Delete' using kubernetes backend is not supported.")
+	return nil
 }
 
 // Get an entry from the datastore.  This errors if the entry does not exist.
 func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
+	log.Debug("Received 'Get' request for %+v", k)
 	switch k.(type) {
 	case model.ProfileKey:
 		return c.getProfile(k.(model.ProfileKey))
@@ -125,13 +132,14 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 	case model.PolicyKey:
 		return c.getPolicy(k.(model.PolicyKey))
 	default:
-		return nil, goerrors.New("Kubernetes backend does not support 'get' for this type")
+		return nil, goerrors.New(fmt.Sprintf("Get unsupported for %+v", k))
 	}
 }
 
 // List entries in the datastore.  This may return an empty list of there are
 // no entries matching the request in the ListInterface.
 func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
+	log.Debug("Received 'List' request for %+v", l)
 	switch l.(type) {
 	case model.ProfileListOptions:
 		return c.listProfiles(l.(model.ProfileListOptions))
@@ -142,7 +150,7 @@ func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
 	case model.PolicyListOptions:
 		return c.listPolicies(l.(model.PolicyListOptions))
 	default:
-		return nil, goerrors.New("Kubernetes backend does not support 'list' for this type")
+		return nil, goerrors.New(fmt.Sprintf("List unsupported for %+v", l))
 	}
 }
 
