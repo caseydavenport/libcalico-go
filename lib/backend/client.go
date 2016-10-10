@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/api"
 	bapi "github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/compat"
@@ -27,6 +28,7 @@ import (
 
 // NewClient creates a new backend datastore client.
 func NewClient(config api.ClientConfig) (c bapi.Client, err error) {
+	log.Debugf("Using datastore type '%s'", config.BackendType)
 	switch config.BackendType {
 	case api.EtcdV2:
 		c, err = etcd.NewEtcdClient(config.BackendConfig.(*etcd.EtcdConfig))
