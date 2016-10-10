@@ -56,6 +56,9 @@ func (syn *kubeSyncer) Start() {
 	// Channel to send the index from which to start the snapshot.
 	initialSnapshotIndex := make(chan *resourceVersions)
 
+	// Initial state is waiting for the datastore.
+	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
+
 	// If we're not in one-shot mode, start the API watcher to
 	// gather updates.
 	if !syn.OneShot {
@@ -74,18 +77,24 @@ func (syn *kubeSyncer) Start() {
 
 // TODO: Make this smarter!
 func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KVPair) {
-
-	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
-	var sUpdate, wUpdate *model.KVPair
+	var update *model.KVPair
 	for {
 		select {
-		case sUpdate = <-snapshotUpdates:
-			log.Debugf("Snapshot update: %+v", sUpdate)
-			syn.callbacks.OnUpdates([]model.KVPair{*sUpdate})
-		case wUpdate = <-watchUpdates:
-			log.Debugf("Watch update: %+v", sUpdate)
-			syn.callbacks.OnUpdates([]model.KVPair{*wUpdate})
+		case update = <-snapshotUpdates:
+			log.Debugf("Snapshot update: %+v", update)
+		case update = <-watchUpdates:
+			log.Debugf("Watch update: %+v", update)
 		}
+
+		// Send the update through.  We send it is a new
+		// KVPair, since the Syncer API expects the values to be
+		// pointers.
+		syn.callbacks.OnUpdates([]model.KVPair{
+			model.KVPair{
+				Key:   update.Key,
+				Value: &update.Value,
+			},
+		})
 	}
 }
 
