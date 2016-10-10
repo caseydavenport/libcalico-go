@@ -99,6 +99,9 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 		// TODO: We're looping over this snapshot a lot.
 		updateChan <- u
 	}
+
+	// Trigger the watcher routine to start watching at the
+	// provided versions.
 	syn.callbacks.OnStatusUpdated(api.InSync)
 	initialVersionChan <- &initialVersions
 

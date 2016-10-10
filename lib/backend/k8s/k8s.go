@@ -33,7 +33,7 @@ type KubeClient struct {
 }
 
 type KubeConfig struct {
-	KubeconfigFile       string `json:"kubeconfig" envconfig:"KUBECONFIG" default:"./kubeconfig"`
+	KubeconfigFile       string `json:"kubeconfig" envconfig:"KUBECONFIG" default:""`
 	Server               string `json:"server" envconfig:"K8S_API_ENDPOINT" default:""`
 	ClientCertificate    string `json:"clientCertificate" envconfig:"K8S_CERT_FILE" default:""`
 	ClientKey            string `json:"clientKey" envconfig:"K8S_KEY_FILE" default:""`
@@ -58,16 +58,21 @@ func NewKubeClient(kc *KubeConfig) (*KubeClient, error) {
 	}
 
 	// Using the override map above, populate any non-empty values.
-	for _, override := range overridesMap {
-		if override.value != "" {
-			*override.variable = override.value
+	loadingRules := clientcmd.ClientConfigLoadingRules{}
+	if kc.KubeconfigFile != "" {
+		loadingRules.ExplicitPath = kc.KubeconfigFile
+		for _, override := range overridesMap {
+			if override.value != "" {
+				*override.variable = override.value
+			}
 		}
 	}
 	log.Infof("Config overrides: %+v", configOverrides)
 
+	// A kubeconfig file was provided.  Use it to load a config, passing through
+	// and overrides.
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kc.KubeconfigFile},
-		configOverrides).ClientConfig()
+		&loadingRules, configOverrides).ClientConfig()
 	if err != nil {
 		return nil, err
 	}
