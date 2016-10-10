@@ -136,6 +136,10 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 		return c.getPool(k.(model.PoolKey))
 	case model.PolicyKey:
 		return c.getPolicy(k.(model.PolicyKey))
+	case model.HostConfigKey:
+		return c.getHostConfig(k.(model.HostConfigKey))
+	case model.GlobalConfigKey:
+		return c.getGlobalConfig(k.(model.GlobalConfigKey))
 	default:
 		return nil, goerrors.New(fmt.Sprintf("Get unsupported for %+v", k))
 	}
@@ -154,6 +158,10 @@ func (c *KubeClient) List(l model.ListInterface) ([]*model.KVPair, error) {
 		return c.listPools(l.(model.PoolListOptions))
 	case model.PolicyListOptions:
 		return c.listPolicies(l.(model.PolicyListOptions))
+	case model.GlobalConfigListOptions:
+		return c.listGlobalConfig(l.(model.GlobalConfigListOptions))
+	case model.HostConfigListOptions:
+		return c.listHostConfig(l.(model.HostConfigListOptions))
 	default:
 		return nil, goerrors.New(fmt.Sprintf("List unsupported for %+v", l))
 	}
@@ -353,4 +361,30 @@ func (c *KubeClient) getPolicy(k model.PolicyKey) (*model.KVPair, error) {
 		return nil, err
 	}
 	return c.converter.networkPolicyToPolicy(networkPolicy)
+}
+
+// TODO: What global config do we actually need to support?
+func (c *KubeClient) getGlobalConfig(k model.GlobalConfigKey) (*model.KVPair, error) {
+	return &model.KVPair{
+		Key:   k,
+		Value: "",
+	}, nil
+}
+
+// TODO: What global config do we actually need to support?
+func (c *KubeClient) listGlobalConfig(l model.GlobalConfigListOptions) ([]*model.KVPair, error) {
+	return []*model.KVPair{}, nil
+}
+
+// TODO: What config do we actually need to support?
+func (c *KubeClient) getHostConfig(k model.HostConfigKey) (*model.KVPair, error) {
+	return &model.KVPair{
+		Key:   k,
+		Value: "",
+	}, nil
+}
+
+// TODO: What config do we actually need to support?
+func (c *KubeClient) listHostConfig(l model.HostConfigListOptions) ([]*model.KVPair, error) {
+	return []*model.KVPair{}, nil
 }
