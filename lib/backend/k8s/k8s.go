@@ -34,7 +34,7 @@ type KubeClient struct {
 
 type KubeConfig struct {
 	KubeconfigFile       string `json:"kubeconfig" envconfig:"KUBECONFIG" default:"./kubeconfig"`
-	Server               string `json:"server" envconfig:"K8S_API" default:""`
+	Server               string `json:"server" envconfig:"K8S_API_ENDPOINT" default:""`
 	ClientCertificate    string `json:"clientCertificate" envconfig:"K8S_CERT_FILE" default:""`
 	ClientKey            string `json:"clientKey" envconfig:"K8S_KEY_FILE" default:""`
 	CertificateAuthority string `json:"certificateAuthority" envconfig:"K8S_CA_FILE" default:""`
