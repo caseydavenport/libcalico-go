@@ -80,8 +80,10 @@ func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KV
 	for {
 		select {
 		case sUpdate = <-snapshotUpdates:
+			log.Debugf("Snapshot update: %+v", sUpdate)
 			syn.callbacks.OnUpdates([]model.KVPair{*sUpdate})
 		case wUpdate = <-watchUpdates:
+			log.Debugf("Watch update: %+v", sUpdate)
 			syn.callbacks.OnUpdates([]model.KVPair{*wUpdate})
 		}
 	}
@@ -107,7 +109,9 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 
 	for {
 		// Wait for an event on the resync request channel.
+		log.Debug("Initial snapshot complete - waiting for resnc trigger")
 		newVersions := <-resyncChan
+		log.Warnf("Received snapshot trigger for versions %+v", newVersions)
 
 		// We've received an event - perform a resync.
 		snap = syn.performSnapshot(newVersions)
@@ -116,7 +120,10 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 			updateChan <- u
 		}
 		syn.callbacks.OnStatusUpdated(api.InSync)
-		// TODO: Send new resource versions back to watcher thread.
+
+		// Send new resource versions back to watcher thread so
+		// it can restart its watch.
+		initialVersionChan <- newVersions
 	}
 }
 
@@ -137,7 +144,9 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 		// the pool through. // TODO: Hacky.
 		if ns.ObjectMeta.Name == "kube-system" {
 			pool, _ := syn.kc.converter.namespaceToPool(&ns)
-			snap = append(snap, pool)
+			if pool != nil {
+				snap = append(snap, pool)
+			}
 		}
 	}
 
@@ -160,6 +169,7 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 			snap = append(snap, wep)
 		}
 	}
+	log.Debugf("Created snapshot: %+v", snap)
 
 	log.Infof("Snapshot resourceVersions: %+v", versions)
 	return snap
@@ -177,9 +187,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	log.Infof("Received initialVersions: %+v", initialVersions)
 
 	// Get watch channels for each resource.
-	opts := k8sapi.ListOptions{
-		ResourceVersion: initialVersions.namespaceVersion,
-	}
+	opts := k8sapi.ListOptions{ResourceVersion: initialVersions.namespaceVersion}
 	nsWatch, err := syn.kc.clientSet.Namespaces().Watch(opts)
 	if err != nil {
 		panic(err)
@@ -201,20 +209,21 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	nsChan := nsWatch.ResultChan()
 	poChan := poWatch.ResultChan()
 	npChan := npWatch.ResultChan()
-	var ns, po, np watch.Event
+	var event watch.Event
 	var kvp, poolKVP *model.KVPair
 	for {
 		select {
-		case ns = <-nsChan:
-			kvp, poolKVP = syn.parseNamespaceEvent(ns)
+		case event = <-nsChan:
+			// TODO: Check for errors which would cause a re-sync.
+			kvp, poolKVP = syn.parseNamespaceEvent(event)
 			latestVersions.namespaceVersion = kvp.Revision.(string)
-		case po = <-poChan:
-			kvp = syn.parsePodEvent(po)
+		case event = <-poChan:
+			kvp = syn.parsePodEvent(event)
 			if kvp != nil {
 				latestVersions.podVersion = kvp.Revision.(string)
 			}
-		case np = <-npChan:
-			kvp = syn.parseNetworkPolicyEvent(np)
+		case event = <-npChan:
+			kvp = syn.parseNetworkPolicyEvent(event)
 			latestVersions.networkPolicyVersion = kvp.Revision.(string)
 		}
 
@@ -286,6 +295,8 @@ func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
 }
 
 func (syn *kubeSyncer) parseNetworkPolicyEvent(e watch.Event) *model.KVPair {
+	log.Debug("Parsing NetworkPolicy watch event")
+	// First, check the event type.
 	np, ok := e.Object.(*extensions.NetworkPolicy)
 	if !ok {
 		panic(ok)
