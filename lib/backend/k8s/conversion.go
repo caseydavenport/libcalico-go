@@ -129,6 +129,34 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	return &kvp, nil
 }
 
+// namespaceToProfileComponents returns the rules, tags, labels structs.
+func (c converter) namespaceToProfileComponents(ns *k8sapi.Namespace) (*model.KVPair, *model.KVPair, *model.KVPair, error) {
+	prof, err := c.namespaceToProfile(ns)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	k := prof.Key.(model.ProfileKey)
+	v := prof.Value.(model.Profile)
+
+	rules := &model.KVPair{
+		Key:   model.ProfileRulesKey{ProfileKey: k},
+		Value: &v.Rules,
+	}
+
+	tags := &model.KVPair{
+		Key:   model.ProfileTagsKey{ProfileKey: k},
+		Value: &v.Tags,
+	}
+
+	labels := &model.KVPair{
+		Key:   model.ProfileLabelsKey{ProfileKey: k},
+		Value: &v.Labels,
+	}
+
+	return rules, tags, labels, nil
+}
+
 func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error) {
 	// If the pod is in host networking, we want nothing to do with it.
 	// Return nil to indicate there is no corresponding workload endpoint.

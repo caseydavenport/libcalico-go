@@ -151,8 +151,10 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	nsList, _ := syn.kc.clientSet.Namespaces().List(opts)
 	versions.namespaceVersion = nsList.ListMeta.ResourceVersion
 	for _, ns := range nsList.Items {
-		prof, _ := syn.kc.converter.namespaceToProfile(&ns)
-		snap = append(snap, syn.convertValueToPointer(prof))
+		// The Syncer API expects a profile to be broken into its underlying
+		// components - rules, tags, labels. TODO: Why?
+		rules, tags, labels, _ := syn.kc.converter.namespaceToProfileComponents(&ns)
+		snap = append(snap, rules, tags, labels)
 
 		// If this is the kube-system Namespace, also send
 		// the pool through. // TODO: Hacky.
@@ -254,13 +256,18 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	poChan := poWatch.ResultChan()
 	npChan := npWatch.ResultChan()
 	var event watch.Event
-	var kvp, poolKVP *model.KVPair
+	var kvp *model.KVPair
 	for {
 		select {
 		case event = <-nsChan:
 			// TODO: Check for errors which would cause a re-sync.
-			kvp, poolKVP = syn.parseNamespaceEvent(event)
-			latestVersions.namespaceVersion = kvp.Revision.(string)
+			kvps := syn.parseNamespaceEvent(event)
+			for _, k := range kvps {
+				if k != nil {
+					updateChan <- k
+				}
+			}
+			continue
 		case event = <-poChan:
 			kvp = syn.parsePodEvent(event)
 			if kvp != nil {
@@ -277,31 +284,26 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			// Send the KVPair to the update channel.
 			updateChan <- syn.convertValueToPointer(kvp)
 		}
-
-		// If there was a pool update, send that as well.
-		if poolKVP != nil {
-			updateChan <- syn.convertValueToPointer(kvp)
-		}
 	}
 }
 
-func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) (*model.KVPair, *model.KVPair) {
+func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) []*model.KVPair {
 	ns, ok := e.Object.(*k8sapi.Namespace)
 	if !ok {
 		panic(ok)
 	}
 
 	// Convert the received Namespace into a profile KVPair.
-	kvp, err := syn.kc.converter.namespaceToProfile(ns)
+	rules, tags, labels, err := syn.kc.converter.namespaceToProfileComponents(ns)
 	if err != nil {
 		panic(err)
 	}
 
 	// If this is the kube-system Namespace, it also houses Pool
 	// information, so send a pool update. FIXME: Make this better.
-	var poolKVP *model.KVPair
+	var pool *model.KVPair
 	if ns.ObjectMeta.Name == "kube-system" {
-		poolKVP, err = syn.kc.converter.namespaceToPool(ns)
+		pool, err = syn.kc.converter.namespaceToPool(ns)
 		if err != nil {
 			panic(err)
 		}
@@ -309,9 +311,11 @@ func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) (*model.KVPair, *model
 
 	// For deletes, we need to nil out the Value part of the KVPair.
 	if e.Type == watch.Deleted {
-		kvp.Value = nil
+		rules.Value = nil
+		tags.Value = nil
+		labels.Value = nil
 	}
-	return kvp, poolKVP
+	return []*model.KVPair{rules, tags, labels, pool}
 }
 
 func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
