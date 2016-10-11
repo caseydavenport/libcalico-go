@@ -212,8 +212,9 @@ func (sync *kubeSyncer) convertValueToPointer(kvp *model.KVPair) *model.KVPair {
 		v := kvp.Value.(model.WorkloadEndpoint)
 		return &model.KVPair{Key: kvp.Key, Value: &v}
 	case model.GlobalConfigKey:
-		v := kvp.Value.(string)
-		return &model.KVPair{Key: kvp.Key, Value: &v}
+		// TODO: Why does felix not like when this one is
+		// a pointer?
+		return kvp
 	}
 	panic("Unsupported type")
 }
