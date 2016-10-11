@@ -152,22 +152,14 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	versions.namespaceVersion = nsList.ListMeta.ResourceVersion
 	for _, ns := range nsList.Items {
 		prof, _ := syn.kc.converter.namespaceToProfile(&ns)
-		v := prof.Value.(model.Profile)
-		snap = append(snap, &model.KVPair{
-			Key:   prof.Key,
-			Value: &v,
-		})
+		snap = append(snap, syn.convertValueToPointer(prof))
 
 		// If this is the kube-system Namespace, also send
 		// the pool through. // TODO: Hacky.
 		if ns.ObjectMeta.Name == "kube-system" {
 			pool, _ := syn.kc.converter.namespaceToPool(&ns)
 			if pool != nil {
-				v := pool.Value.(model.Pool)
-				snap = append(snap, &model.KVPair{
-					Key:   pool.Key,
-					Value: &v,
-				})
+				snap = append(snap, syn.convertValueToPointer(pool))
 			}
 		}
 	}
@@ -178,11 +170,7 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	versions.networkPolicyVersion = npList.ListMeta.ResourceVersion
 	for _, np := range npList.Items {
 		pol, _ := syn.kc.converter.networkPolicyToPolicy(&np)
-		v := pol.Value.(model.Policy)
-		snap = append(snap, &model.KVPair{
-			Key:   pol.Key,
-			Value: &v,
-		})
+		snap = append(snap, syn.convertValueToPointer(pol))
 	}
 
 	// Get Pods (WorkloadEndpoints)
@@ -192,21 +180,42 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	for _, po := range poList.Items {
 		wep, _ := syn.kc.converter.podToWorkloadEndpoint(&po)
 		if wep != nil {
-			v := wep.Value.(model.WorkloadEndpoint)
-			snap = append(snap, &model.KVPair{
-				Key:   wep.Key,
-				Value: &v,
-			})
+			snap = append(snap, syn.convertValueToPointer(wep))
 		}
 	}
 
 	// Sync GlobalConfig
 	confList, _ := syn.kc.listGlobalConfig(model.GlobalConfigListOptions{})
-	snap = append(snap, confList...)
+	for _, c := range confList {
+		snap = append(snap, syn.convertValueToPointer(c))
+	}
 
 	log.Infof("Snapshot resourceVersions: %+v", versions)
 	log.Debugf("Created snapshot: %+v", snap)
 	return snap
+}
+
+// convertValueToPointer converts the Value of a KVPair to a typed pointer, rather
+// than a pointer to an interface.
+func (sync *kubeSyncer) convertValueToPointer(kvp *model.KVPair) *model.KVPair {
+	switch kvp.Key.(type) {
+	case model.ProfileKey:
+		v := kvp.Value.(model.Profile)
+		return &model.KVPair{Key: kvp.Key, Value: &v}
+	case model.PoolKey:
+		v := kvp.Value.(model.Pool)
+		return &model.KVPair{Key: kvp.Key, Value: &v}
+	case model.PolicyKey:
+		v := kvp.Value.(model.Policy)
+		return &model.KVPair{Key: kvp.Key, Value: &v}
+	case model.WorkloadEndpointKey:
+		v := kvp.Value.(model.WorkloadEndpoint)
+		return &model.KVPair{Key: kvp.Key, Value: &v}
+	case model.GlobalConfigKey:
+		v := kvp.Value.(string)
+		return &model.KVPair{Key: kvp.Key, Value: &v}
+	}
+	panic("Unsupported type")
 }
 
 // TODO: Handle case where we fall behind, trigger another snapshot.
@@ -265,12 +274,12 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 		// we don't care about, the KVPair will be nil.
 		if kvp != nil {
 			// Send the KVPair to the update channel.
-			updateChan <- kvp
+			updateChan <- syn.convertValueToPointer(kvp)
 		}
 
 		// If there was a pool update, send that as well.
 		if poolKVP != nil {
-			updateChan <- poolKVP
+			updateChan <- syn.convertValueToPointer(kvp)
 		}
 	}
 }
