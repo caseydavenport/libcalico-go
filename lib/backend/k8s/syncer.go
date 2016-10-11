@@ -56,8 +56,8 @@ func (syn *kubeSyncer) Start() {
 	// Channel to send the index from which to start the snapshot.
 	initialSnapshotIndex := make(chan *resourceVersions)
 
-	// Initial state is waiting for the datastore.
-	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
+	// Status channel
+	statusUpdates := make(chan api.SyncStatus)
 
 	// If we're not in one-shot mode, start the API watcher to
 	// gather updates.
@@ -68,22 +68,31 @@ func (syn *kubeSyncer) Start() {
 	// Start a background thread to read snapshots from etcd.  It will
 	// read a start-of-day snapshot and then wait to be signalled on the
 	// resyncIndex channel.
-	go syn.readSnapshot(snapshotUpdates, triggerResync, initialSnapshotIndex)
+	go syn.readSnapshot(snapshotUpdates, triggerResync, initialSnapshotIndex, statusUpdates)
 
 	// Start a routine to merge updates from the snapshot routine and the
 	// watch routine (if running), and pass information to callbacks.
-	go syn.mergeUpdates(snapshotUpdates, watchUpdates)
+	go syn.mergeUpdates(snapshotUpdates, watchUpdates, statusUpdates)
 }
 
 // TODO: Make this smarter!
-func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KVPair) {
+func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KVPair, statusUpdates chan api.SyncStatus) {
 	var update *model.KVPair
+	currentStatus := api.WaitForDatastore
+	newStatus := api.WaitForDatastore
+	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
 	for {
 		select {
 		case update = <-snapshotUpdates:
 			log.Debugf("Snapshot update: %+v", update)
 		case update = <-watchUpdates:
 			log.Debugf("Watch update: %+v", update)
+		case newStatus = <-statusUpdates:
+			if newStatus != currentStatus {
+				syn.callbacks.OnStatusUpdated(newStatus)
+				currentStatus = newStatus
+			}
+			continue
 		}
 
 		// Send the update through.  We send it is a new
@@ -99,27 +108,29 @@ func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KV
 }
 
 func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
-	resyncChan chan *resourceVersions, initialVersionChan chan *resourceVersions) {
+	resyncChan chan *resourceVersions, initialVersionChan chan *resourceVersions, statusUpdates chan api.SyncStatus) {
 
 	log.Info("Starting readSnapshot worker")
 	// Perform an initial snapshot, and send the latest versions to the
 	// watcher routine.
 	initialVersions := resourceVersions{}
+	statusUpdates <- api.ResyncInProgress
 	snap := syn.performSnapshot(&initialVersions)
 	for _, u := range snap {
 		// TODO: We're looping over this snapshot a lot.
 		updateChan <- u
 	}
+	statusUpdates <- api.InSync
 
 	// Trigger the watcher routine to start watching at the
 	// provided versions.
-	syn.callbacks.OnStatusUpdated(api.InSync)
 	initialVersionChan <- &initialVersions
 
 	for {
 		// Wait for an event on the resync request channel.
 		log.Debug("Initial snapshot complete - waiting for resnc trigger")
 		newVersions := <-resyncChan
+		statusUpdates <- api.ResyncInProgress
 		log.Warnf("Received snapshot trigger for versions %+v", newVersions)
 
 		// We've received an event - perform a resync.
@@ -128,7 +139,7 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 			// TODO: We're looping over this snapshot a lot.
 			updateChan <- u
 		}
-		syn.callbacks.OnStatusUpdated(api.InSync)
+		statusUpdates <- api.InSync
 
 		// Send new resource versions back to watcher thread so
 		// it can restart its watch.
@@ -138,7 +149,6 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *model.KVPair,
 
 func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPair {
 	snap := []*model.KVPair{}
-	syn.callbacks.OnStatusUpdated(api.ResyncInProgress)
 	opts := k8sapi.ListOptions{}
 
 	// Get Namespaces (Profiles)
