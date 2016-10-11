@@ -98,12 +98,7 @@ func (syn *kubeSyncer) mergeUpdates(snapshotUpdates, watchUpdates chan *model.KV
 		// Send the update through.  We send it is a new
 		// KVPair, since the Syncer API expects the values to be
 		// pointers.
-		syn.callbacks.OnUpdates([]model.KVPair{
-			model.KVPair{
-				Key:   update.Key,
-				Value: &update.Value,
-			},
-		})
+		syn.callbacks.OnUpdates([]model.KVPair{*update})
 	}
 }
 
@@ -157,14 +152,22 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	versions.namespaceVersion = nsList.ListMeta.ResourceVersion
 	for _, ns := range nsList.Items {
 		prof, _ := syn.kc.converter.namespaceToProfile(&ns)
-		snap = append(snap, prof)
+		v := prof.Value.(model.Profile)
+		snap = append(snap, &model.KVPair{
+			Key:   prof.Key,
+			Value: &v,
+		})
 
 		// If this is the kube-system Namespace, also send
 		// the pool through. // TODO: Hacky.
 		if ns.ObjectMeta.Name == "kube-system" {
 			pool, _ := syn.kc.converter.namespaceToPool(&ns)
 			if pool != nil {
-				snap = append(snap, pool)
+				v := pool.Value.(model.Pool)
+				snap = append(snap, &model.KVPair{
+					Key:   pool.Key,
+					Value: &v,
+				})
 			}
 		}
 	}
@@ -175,7 +178,11 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	versions.networkPolicyVersion = npList.ListMeta.ResourceVersion
 	for _, np := range npList.Items {
 		pol, _ := syn.kc.converter.networkPolicyToPolicy(&np)
-		snap = append(snap, pol)
+		v := pol.Value.(model.Policy)
+		snap = append(snap, &model.KVPair{
+			Key:   pol.Key,
+			Value: &v,
+		})
 	}
 
 	// Get Pods (WorkloadEndpoints)
@@ -185,7 +192,11 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 	for _, po := range poList.Items {
 		wep, _ := syn.kc.converter.podToWorkloadEndpoint(&po)
 		if wep != nil {
-			snap = append(snap, wep)
+			v := wep.Value.(model.WorkloadEndpoint)
+			snap = append(snap, &model.KVPair{
+				Key:   wep.Key,
+				Value: &v,
+			})
 		}
 	}
 
