@@ -373,7 +373,20 @@ func (c *KubeClient) getGlobalConfig(k model.GlobalConfigKey) (*model.KVPair, er
 
 // TODO: What global config do we actually need to support?
 func (c *KubeClient) listGlobalConfig(l model.GlobalConfigListOptions) ([]*model.KVPair, error) {
-	return []*model.KVPair{}, nil
+	return []*model.KVPair{
+		&model.KVPair{
+			Key:   model.GlobalConfigKey{Name: "LogSeveritySys"},
+			Value: "debug",
+		},
+		&model.KVPair{
+			Key:   model.GlobalConfigKey{Name: "LogSeverityScreen"},
+			Value: "debug",
+		},
+		&model.KVPair{
+			Key:   model.GlobalConfigKey{Name: "LogSeverityFile"},
+			Value: "debug",
+		},
+	}, nil
 }
 
 // TODO: What config do we actually need to support?
