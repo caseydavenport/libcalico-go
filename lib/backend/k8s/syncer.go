@@ -178,9 +178,13 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) []*model.KVPa
 			snap = append(snap, wep)
 		}
 	}
-	log.Debugf("Created snapshot: %+v", snap)
+
+	// Sync GlobalConfig
+	confList, _ := syn.kc.listGlobalConfig(model.GlobalConfigListOptions{})
+	snap = append(snap, confList...)
 
 	log.Infof("Snapshot resourceVersions: %+v", versions)
+	log.Debugf("Created snapshot: %+v", snap)
 	return snap
 }
 
