@@ -265,6 +265,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			for _, k := range kvps {
 				if k != nil {
 					updateChan <- k
+					latestVersions.namespaceVersion = kvp.Revision.(string)
 				}
 			}
 			continue

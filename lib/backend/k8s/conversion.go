@@ -129,7 +129,8 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	return &kvp, nil
 }
 
-// namespaceToProfileComponents returns the rules, tags, labels structs.
+// namespaceToProfileComponents returns the rules, tags, labels structs as expected
+// by Felix over the Syncer API.
 func (c converter) namespaceToProfileComponents(ns *k8sapi.Namespace) (*model.KVPair, *model.KVPair, *model.KVPair, error) {
 	prof, err := c.namespaceToProfile(ns)
 	if err != nil {
@@ -146,12 +147,12 @@ func (c converter) namespaceToProfileComponents(ns *k8sapi.Namespace) (*model.KV
 
 	tags := &model.KVPair{
 		Key:   model.ProfileTagsKey{ProfileKey: k},
-		Value: &v.Tags,
+		Value: v.Tags,
 	}
 
 	labels := &model.KVPair{
 		Key:   model.ProfileLabelsKey{ProfileKey: k},
-		Value: &v.Labels,
+		Value: v.Labels,
 	}
 
 	return rules, tags, labels, nil
