@@ -191,6 +191,10 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	// first two letters in Calico!)
 	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
 
+	// Build the labels map.
+	labels := pod.ObjectMeta.Labels
+	labels["calico/k8s_ns"] = pod.ObjectMeta.Namespace
+
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
 		Key: model.WorkloadEndpointKey{
@@ -206,7 +210,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 			ProfileIDs: []string{profile},
 			IPv4Nets:   ipNets,
 			IPv6Nets:   []cnet.IPNet{},
-			Labels:     pod.ObjectMeta.Labels,
+			Labels:     labels,
 		},
 		Revision: pod.ObjectMeta.ResourceVersion,
 	}
