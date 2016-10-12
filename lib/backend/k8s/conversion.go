@@ -181,16 +181,13 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 		ipNets = append(ipNets, *ipNet)
 	}
 
-	// TODO: Get the real mac from somewhere?
-	mac, err := net.ParseMAC("ff:ff:ff:ff:ff:ff")
-	if err != nil {
-		return nil, err
-	}
-
 	// Generate the interface name based on identifiers.
 	h := sha1.New()
 	h.Write([]byte(workload))
 	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
+
+	// Auto generate a MAC address for this pod.
+	mac := net.HardwareAddr(h.Sum(nil)[:6])
 
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
