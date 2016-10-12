@@ -186,8 +186,10 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	h.Write([]byte(workload))
 	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
 
-	// Auto generate a MAC address for this pod.
-	mac := net.HardwareAddr(h.Sum(nil)[:6])
+	// Auto generate a MAC address for this pod.  The first byte is always
+	// 'ca' (202), which ensures the multicast bit isn't set (and is also the
+	// first two letters in Calico!)
+	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
 
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
