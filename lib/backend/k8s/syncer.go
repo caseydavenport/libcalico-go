@@ -211,7 +211,7 @@ func (sync *kubeSyncer) convertValueToPointer(kvp *model.KVPair) *model.KVPair {
 		v := kvp.Value.(model.Policy)
 		return &model.KVPair{Key: kvp.Key, Value: &v, Revision: kvp.Revision}
 	case model.WorkloadEndpointKey:
-		v, ok := kvp.Value.(model.WorkloadEndpoint)
+		v := kvp.Value.(model.WorkloadEndpoint)
 		return &model.KVPair{Key: kvp.Key, Value: &v, Revision: kvp.Revision}
 	default:
 		// Otherwise, just return the object as it is.  Felix expects some objects
@@ -261,6 +261,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	for {
 		select {
 		case event = <-nsChan:
+			log.Debugf("Incoming Namespace watch event. Type=%s, Object=%+v", event.Type, event.Object)
 			if needsResync = syn.eventTriggersResync(event); needsResync {
 				// We need to resync.  Break out of the inner for loop, back
 				// into the sync loop.
@@ -281,6 +282,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			}
 			continue
 		case event = <-poChan:
+			log.Debugf("Incoming Pod watch event. Type=%s, Object=%+v", event.Type, event.Object)
 			if needsResync = syn.eventTriggersResync(event); needsResync {
 				// We need to resync.  Break out of the inner for loop, back
 				// into the sync loop.
@@ -298,6 +300,7 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			latestVersions.podVersion = kvp.Revision.(string)
 			updateChan <- syn.convertValueToPointer(kvp)
 		case event = <-npChan:
+			log.Debugf("Incoming NetworkPolicy watch event. Type=%s, Object=%+v", event.Type, event.Object)
 			if needsResync = syn.eventTriggersResync(event); needsResync {
 				// We need to resync.  Break out of the inner for loop, back
 				// into the sync loop.
@@ -330,7 +333,9 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 // eventTriggersResync returns true of the given event requires a
 // full datastore resync to occur, and false otherwise.
 func (syn *kubeSyncer) eventTriggersResync(e watch.Event) bool {
-	if e.Type == watch.Error {
+	// If we encounter an error, or if the event is nil (which can indicate
+	// an unexpected connection close).
+	if e.Type == watch.Error || e.Object == nil {
 		return true
 	}
 	return false
@@ -370,7 +375,7 @@ func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) []*model.KVPair {
 func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
 	pod, ok := e.Object.(*k8sapi.Pod)
 	if !ok {
-		panic(fmt.Sprintf("Invalid pod event: %+v", e.Object))
+		panic(fmt.Sprintf("Invalid pod event. Type: %s, Object: %+v", e.Type, e.Object))
 	}
 
 	// Convert the received Namespace into a profile KVPair.
@@ -402,7 +407,7 @@ func (syn *kubeSyncer) parseNetworkPolicyEvent(e watch.Event) *model.KVPair {
 	// First, check the event type.
 	np, ok := e.Object.(*extensions.NetworkPolicy)
 	if !ok {
-		panic(fmt.Sprintf("Invalid network policy event: %+v", e.Object))
+		panic(fmt.Sprintf("Invalid NetworkPolicy event. Type: %s, Object: %+v", e.Type, e.Object))
 	}
 
 	// Convert the received NetworkPolicy into a profile KVPair.
