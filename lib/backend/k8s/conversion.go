@@ -130,9 +130,9 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	return &kvp, nil
 }
 
-// vethParamsForWorkload returns a deterministic veth name and MAC address
+// VethParamsForWorkload returns a deterministic veth name and MAC address
 // for the given Kubernetes workload.
-func (c converter) vethParamsForWorkload(workload string) (string, net.HardwareAddr) {
+func (c converter) VethParamsForWorkload(workload string) (string, net.HardwareAddr) {
 	// A SHA1 is always 20 bytes long, and so is sufficient for generating the
 	// veth name and mac addr.
 	h := sha1.New()
@@ -172,7 +172,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 
 	// Generate the interface name and MAC based on workload.  This must match
 	// the host-side veth configured by the CNI plugin.
-	interfaceName, mac := c.vethParamsForWorkload(workload)
+	interfaceName, mac := c.VethParamsForWorkload(workload)
 
 	// Build the labels map.
 	labels := pod.ObjectMeta.Labels
