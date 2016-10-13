@@ -179,10 +179,13 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	labels := pod.ObjectMeta.Labels
 	labels["calico/k8s_ns"] = pod.ObjectMeta.Namespace
 
+	// TODO: Determine plan for `Hostname` - what value do we want here?
+	// It could be the Node IP addr, or it could be the NodeName.
+
 	// Create the key / value pair to return.
 	kvp := model.KVPair{
 		Key: model.WorkloadEndpointKey{
-			Hostname:       pod.Spec.NodeName, // TODO: Is this always set?
+			Hostname:       pod.Spec.NodeName,
 			OrchestratorID: "k8s",
 			WorkloadID:     workload,
 			EndpointID:     "eth0",
