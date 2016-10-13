@@ -372,31 +372,47 @@ func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
 		panic(fmt.Sprintf("Invalid pod event. Type: %s, Object: %+v", e.Type, e.Object))
 	}
 
-	// Convert the received Namespace into a profile KVPair.
+	// Ignore any updates for host networked pods.
+	if syn.kc.converter.isHostNetworked(pod) {
+		log.Debugf("Skipping host networked pod %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+		return nil
+	}
+
+	// Convert the received Namespace into a KVPair.
 	kvp, err := syn.kc.converter.podToWorkloadEndpoint(pod)
 	if err != nil {
 		panic(err)
 	}
 
-	// podToWorkloadEndpoint returns nil when the provided pod
-	// is either host networked, or doesn't have an IP address yet.
-	// We don't care about these events.
-	if kvp == nil {
-		return nil
-	}
-
-	// Determine what to do for this event.
-	if e.Type == watch.Deleted {
+	// We behave differently based on the event type.
+	switch e.Type {
+	case watch.Deleted:
 		// For deletes, we need to nil out the Value part of the KVPair.
 		log.Debugf("Delete for pod %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 		kvp.Value = nil
-	} else if reflect.DeepEqual(labelCache[kvp.Key.(model.WorkloadEndpointKey).WorkloadID], kvp.Value.(*model.WorkloadEndpoint).Labels) {
-		// Labels haven't changed - no need to send an update for this add/modify.
-		log.Debug("Skipping Pod event with no label change.")
-		return nil
-	} else {
+
+		// Remove it from the cache, if it is there.
+		workload := kvp.Key.(model.WorkloadEndpointKey).WorkloadID
+		delete(labelCache, workload)
+	default:
+		// Adds and modifies are treated the same.  First, if the pod doesn't have an
+		// IP address, we ignore it until it does.
+		if !syn.kc.converter.hasIPAddress(pod) {
+			log.Debugf("Skipping pod with no IP: %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+			return nil
+		}
+
+		// If it does have an address, we only send updates if the labels have changed.
+		workload := kvp.Key.(model.WorkloadEndpointKey).WorkloadID
+		labels := kvp.Value.(*model.WorkloadEndpoint).Labels
+		if reflect.DeepEqual(labelCache[workload], labels) {
+			// Labels haven't changed - no need to send an update for this add/modify.
+			log.Debugf("Skipping pod event - labels didn't change: %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+			return nil
+		}
+
 		// Labels have changed on a running pod - update the label cache.
-		labelCache[kvp.Key.(model.WorkloadEndpointKey).WorkloadID] = kvp.Value.(*model.WorkloadEndpoint).Labels
+		labelCache[workload] = labels
 	}
 
 	return kvp

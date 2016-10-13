@@ -242,17 +242,16 @@ func (c *KubeClient) listWorkloadEndpoints(l model.WorkloadEndpointListOptions) 
 	// For each Pod, return a workload endpoint.
 	ret := []*model.KVPair{}
 	for _, pod := range pods.Items {
+		// Decide if this pod should be displayed.
+		if c.converter.isHostNetworked(&pod) || !c.converter.hasIPAddress(&pod) {
+			continue
+		}
+
 		kvp, err := c.converter.podToWorkloadEndpoint(&pod)
 		if err != nil {
 			return nil, err
 		}
-
-		// Some Pods are invalid - e.g those with hostNetwork.
-		// The conversion func returns these as nil, so just
-		// skip these.
-		if kvp != nil {
-			ret = append(ret, kvp)
-		}
+		ret = append(ret, kvp)
 	}
 	return ret, nil
 }
@@ -266,8 +265,11 @@ func (c *KubeClient) getWorkloadEndpoint(k model.WorkloadEndpointKey) (*model.KV
 	pod, err := c.clientSet.Pods(namespace).Get(podName)
 	if err != nil {
 		return nil, err
-	} else if pod == nil {
-		return nil, goerrors.New("No such pod, or hostNetwork=true")
+	}
+
+	// Decide if this pod should be displayed.
+	if c.converter.isHostNetworked(pod) || !c.converter.hasIPAddress(pod) {
+		return nil, nil
 	}
 	return c.converter.podToWorkloadEndpoint(pod)
 }
