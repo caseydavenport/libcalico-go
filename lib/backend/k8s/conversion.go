@@ -158,17 +158,19 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	profile := fmt.Sprintf("k8s_ns.%s", pod.ObjectMeta.Namespace)
 	workload := fmt.Sprintf("%s.%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 
-	// Parse the pod's IP address, MAC.
-	ipNets := []cnet.IPNet{}
-	if pod.Status.PodIP != "" {
-		// Only grab the IP address if it is present.  If not present, it
-		// means the Pod hasn't gone through CNI yet.
-		_, ipNet, err := cnet.ParseCIDR(fmt.Sprintf("%s/32", pod.Status.PodIP))
-		if err != nil {
-			return nil, err
-		}
-		ipNets = append(ipNets, *ipNet)
+	// If the pod doesn't have an IP address yet, then it hasn't gone through CNI.
+	// Treat this as if it didn't exist.
+	if pod.Status.PodIP == "" {
+		log.Debugf("Ignoring pod without IP address %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
+		return nil, nil
 	}
+
+	// Parse the Pod's IP address.
+	_, ipNet, err := cnet.ParseCIDR(fmt.Sprintf("%s/32", pod.Status.PodIP))
+	if err != nil {
+		return nil, err
+	}
+	ipNets := []cnet.IPNet{*ipNet}
 
 	// Generate the interface name and MAC based on workload.  This must match
 	// the host-side veth configured by the CNI plugin.
