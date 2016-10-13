@@ -31,7 +31,6 @@ import (
 	k8sapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/util/intstr"
 )
 
 var (
@@ -89,7 +88,7 @@ func (c converter) namespaceToPool(ns *k8sapi.Namespace) (*model.KVPair, error) 
 	}
 	return &model.KVPair{
 		Key:      model.PoolKey{CIDR: pool.CIDR},
-		Value:    pool,
+		Value:    &pool,
 		Revision: ns.ObjectMeta.ResourceVersion,
 	}, nil
 }
@@ -118,7 +117,7 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	name := fmt.Sprintf("k8s_ns.%s", ns.ObjectMeta.Name)
 	kvp := model.KVPair{
 		Key: model.ProfileKey{Name: name},
-		Value: model.Profile{
+		Value: &model.Profile{
 			Rules: model.ProfileRules{
 				InboundRules:  []model.Rule{model.Rule{Action: ingressAction}},
 				OutboundRules: []model.Rule{model.Rule{Action: "allow"}},
@@ -131,36 +130,20 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	return &kvp, nil
 }
 
-// namespaceToProfileComponents returns the rules, tags, labels structs as expected
-// by Felix over the Syncer API.
-func (c converter) namespaceToProfileComponents(ns *k8sapi.Namespace) (*model.KVPair, *model.KVPair, *model.KVPair, error) {
-	prof, err := c.namespaceToProfile(ns)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+// vethParamsForWorkload returns a deterministic veth name and MAC address
+// for the given Kubernetes workload.
+func (c converter) vethParamsForWorkload(workload string) (string, net.HardwareAddr) {
+	// A SHA1 is always 20 bytes long, and so is sufficient for generating the
+	// veth name and mac addr.
+	h := sha1.New()
+	h.Write([]byte(workload))
+	vethName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
 
-	k := prof.Key.(model.ProfileKey)
-	v := prof.Value.(model.Profile)
-
-	rules := &model.KVPair{
-		Key:      model.ProfileRulesKey{ProfileKey: k},
-		Value:    &v.Rules,
-		Revision: ns.ObjectMeta.ResourceVersion,
-	}
-
-	tags := &model.KVPair{
-		Key:      model.ProfileTagsKey{ProfileKey: k},
-		Value:    v.Tags,
-		Revision: ns.ObjectMeta.ResourceVersion,
-	}
-
-	labels := &model.KVPair{
-		Key:      model.ProfileLabelsKey{ProfileKey: k},
-		Value:    v.Labels,
-		Revision: ns.ObjectMeta.ResourceVersion,
-	}
-
-	return rules, tags, labels, nil
+	// Auto generate a MAC address for this pod.  The first byte is always
+	// 'ca' (202), which ensures the multicast bit isn't set (and is also the
+	// first two letters in Calico!)
+	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
+	return vethName, mac
 }
 
 func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error) {
@@ -187,15 +170,9 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 		ipNets = append(ipNets, *ipNet)
 	}
 
-	// Generate the interface name based on identifiers.
-	h := sha1.New()
-	h.Write([]byte(workload))
-	interfaceName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
-
-	// Auto generate a MAC address for this pod.  The first byte is always
-	// 'ca' (202), which ensures the multicast bit isn't set (and is also the
-	// first two letters in Calico!)
-	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
+	// Generate the interface name and MAC based on workload.  This must match
+	// the host-side veth configured by the CNI plugin.
+	interfaceName, mac := c.vethParamsForWorkload(workload)
 
 	// Build the labels map.
 	labels := pod.ObjectMeta.Labels
@@ -209,7 +186,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 			WorkloadID:     workload,
 			EndpointID:     "eth0",
 		},
-		Value: model.WorkloadEndpoint{
+		Value: &model.WorkloadEndpoint{
 			State:      "active",
 			Name:       interfaceName,
 			Mac:        cnet.MAC{HardwareAddr: mac},
@@ -241,7 +218,7 @@ func (c converter) networkPolicyToPolicy(np *extensions.NetworkPolicy) (*model.K
 			Name: policyName,
 			Tier: "k8s-network-policy",
 		},
-		Value: model.Policy{
+		Value: &model.Policy{
 			Order:         &order,
 			Selector:      c.parseSelector(&np.Spec.PodSelector, &np.ObjectMeta.Namespace),
 			InboundRules:  inboundRules,
@@ -366,10 +343,12 @@ func (c converter) parsePolicyPeer(peer extensions.NetworkPolicyPeer, ns string)
 }
 
 func (c converter) parsePolicyPort(port extensions.NetworkPolicyPort) []numorstring.Port {
-	if port.Port != nil && port.Port.Type == intstr.Int {
-		return []numorstring.Port{numorstring.PortFromInt(port.Port.IntVal)}
-	} else if port.Port != nil && port.Port.Type == intstr.String {
-		return []numorstring.Port{numorstring.PortFromString(port.Port.StrVal)}
+	if port.Port != nil {
+		p, err := numorstring.PortFromString(port.Port.String())
+		if err != nil {
+			panic(fmt.Sprintf("Invalid port %+v: %s", port.Port, err))
+		}
+		return []numorstring.Port{p}
 	}
 
 	// No ports - return empty list.
