@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/numorstring"
@@ -87,8 +88,9 @@ func (c converter) namespaceToPool(ns *k8sapi.Namespace) (*model.KVPair, error) 
 		return nil, err
 	}
 	return &model.KVPair{
-		Key:   model.PoolKey{CIDR: pool.CIDR},
-		Value: pool,
+		Key:      model.PoolKey{CIDR: pool.CIDR},
+		Value:    pool,
+		Revision: ns.ObjectMeta.ResourceVersion,
 	}, nil
 }
 
@@ -141,18 +143,21 @@ func (c converter) namespaceToProfileComponents(ns *k8sapi.Namespace) (*model.KV
 	v := prof.Value.(model.Profile)
 
 	rules := &model.KVPair{
-		Key:   model.ProfileRulesKey{ProfileKey: k},
-		Value: &v.Rules,
+		Key:      model.ProfileRulesKey{ProfileKey: k},
+		Value:    &v.Rules,
+		Revision: ns.ObjectMeta.ResourceVersion,
 	}
 
 	tags := &model.KVPair{
-		Key:   model.ProfileTagsKey{ProfileKey: k},
-		Value: v.Tags,
+		Key:      model.ProfileTagsKey{ProfileKey: k},
+		Value:    v.Tags,
+		Revision: ns.ObjectMeta.ResourceVersion,
 	}
 
 	labels := &model.KVPair{
-		Key:   model.ProfileLabelsKey{ProfileKey: k},
-		Value: v.Labels,
+		Key:      model.ProfileLabelsKey{ProfileKey: k},
+		Value:    v.Labels,
+		Revision: ns.ObjectMeta.ResourceVersion,
 	}
 
 	return rules, tags, labels, nil
@@ -162,6 +167,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 	// If the pod is in host networking, we want nothing to do with it.
 	// Return nil to indicate there is no corresponding workload endpoint.
 	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.HostNetwork == true {
+		log.Debugf("Ignoring pod with host networking: %s/%s", pod.ObjectMeta.Namespace, pod.ObjectMeta.Name)
 		return nil, nil
 	}
 
