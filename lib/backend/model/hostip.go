@@ -16,7 +16,6 @@ package model
 
 import (
 	"fmt"
-	"github.com/tigera/libcalico-go/lib/net"
 	"reflect"
 	"regexp"
 
