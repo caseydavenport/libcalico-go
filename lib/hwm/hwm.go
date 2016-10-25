@@ -91,6 +91,7 @@ func (trie *HighWatermarkTracker) StoreDeletion(key string, newModIdx uint64) []
 		deletedKeys = append(deletedKeys, childKey)
 		return nil
 	})
+	trie.hwms.DeleteSubtree(prefix)
 	return deletedKeys
 }
 
