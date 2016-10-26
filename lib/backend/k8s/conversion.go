@@ -193,7 +193,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 		Value: &model.WorkloadEndpoint{
 			State:      "active",
 			Name:       interfaceName,
-			Mac:        cnet.MAC{HardwareAddr: mac},
+			Mac:        &cnet.MAC{HardwareAddr: mac},
 			ProfileIDs: []string{profile},
 			IPv4Nets:   ipNets,
 			IPv6Nets:   []cnet.IPNet{},
