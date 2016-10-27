@@ -16,6 +16,7 @@ package k8s
 
 import (
 	"fmt"
+	"time"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
@@ -47,12 +48,26 @@ type resourceVersions struct {
 	networkPolicyVersion string
 }
 
+func getUpdateType(e watch.Event) model.UpdateType {
+	// Determine the update type.
+	updateType := model.UpdateTypeKVUnknown
+	switch e.Type {
+	case watch.Added:
+		updateType = model.UpdateTypeKVNew
+	case watch.Deleted:
+		updateType = model.UpdateTypeKVDeleted
+	case watch.Modified:
+		updateType = model.UpdateTypeKVUpdated
+	}
+	return updateType
+}
+
 func (syn *kubeSyncer) Start() {
 	// Channel for receiving updates from a snapshot.
-	snapshotUpdates := make(chan *[]model.KVPair)
+	snapshotUpdates := make(chan *[]model.Update)
 
 	// Channel for receiving updates from the watcher.
-	watchUpdates := make(chan *model.KVPair)
+	watchUpdates := make(chan *model.Update)
 
 	// Channel used by the watcher to trigger a re-sync.
 	triggerResync := make(chan *resourceVersions, 5)
@@ -82,9 +97,9 @@ func (syn *kubeSyncer) Start() {
 }
 
 // mergeUpdates ensures that callbacks are all executed from the same thread.
-func (syn *kubeSyncer) mergeUpdates(snapshotUpdates chan *[]model.KVPair, watchUpdates chan *model.KVPair, statusUpdates chan api.SyncStatus) {
-	var update *model.KVPair
-	var updates *[]model.KVPair
+func (syn *kubeSyncer) mergeUpdates(snapshotUpdates chan *[]model.Update, watchUpdates chan *model.Update, statusUpdates chan api.SyncStatus) {
+	var update *model.Update
+	var updates *[]model.Update
 	currentStatus := api.WaitForDatastore
 	newStatus := api.WaitForDatastore
 	syn.callbacks.OnStatusUpdated(api.WaitForDatastore)
@@ -101,7 +116,7 @@ func (syn *kubeSyncer) mergeUpdates(snapshotUpdates chan *[]model.KVPair, watchU
 			if currentStatus != api.InSync {
 				panic("Recieved watch update while not in sync")
 			}
-			syn.callbacks.OnUpdates([]model.KVPair{*update})
+			syn.callbacks.OnUpdates([]model.Update{*update})
 		case newStatus = <-statusUpdates:
 			if newStatus != currentStatus {
 				log.Debugf("Status update. %s -> %s", currentStatus, newStatus)
@@ -112,7 +127,7 @@ func (syn *kubeSyncer) mergeUpdates(snapshotUpdates chan *[]model.KVPair, watchU
 	}
 }
 
-func (syn *kubeSyncer) readSnapshot(updateChan chan *[]model.KVPair,
+func (syn *kubeSyncer) readSnapshot(updateChan chan *[]model.Update,
 	resyncChan chan *resourceVersions, initialVersionChan chan *resourceVersions, statusUpdates chan api.SyncStatus) {
 
 	log.Info("Starting readSnapshot worker")
@@ -151,73 +166,104 @@ func (syn *kubeSyncer) readSnapshot(updateChan chan *[]model.KVPair,
 // performSnapshot returns a list of existing objects in the datastore, and
 // populates the provided resourceVersions with the latest k8s resource version
 // for each.
-func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) *[]model.KVPair {
-	snap := []model.KVPair{}
+func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) *[]model.Update {
+	snap := []model.Update{}
 	opts := k8sapi.ListOptions{}
 
-	// Get Namespaces (Profiles)
-	log.Info("Syncing Namespaces")
-	nsList, _ := syn.kc.clientSet.Namespaces().List(opts)
-	versions.namespaceVersion = nsList.ListMeta.ResourceVersion
-	for _, ns := range nsList.Items {
-		// The Syncer API expects a profile to be broken into its underlying
-		// components - rules, tags, labels.
-		profile, err := syn.kc.converter.namespaceToProfile(&ns)
+	// Loop until we successfully are able to accesss the API.
+	for {
+		// Get Namespaces (Profiles)
+		log.Info("Syncing Namespaces")
+		nsList, err := syn.kc.clientSet.Namespaces().List(opts)
 		if err != nil {
-			panic(err)
+			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
 		}
-		rules, tags, labels := compat.ToTagsLabelsRules(profile)
-		snap = append(snap, *rules, *tags, *labels)
+		versions.namespaceVersion = nsList.ListMeta.ResourceVersion
+		for _, ns := range nsList.Items {
+			// The Syncer API expects a profile to be broken into its underlying
+			// components - rules, tags, labels.
+			profile, err := syn.kc.converter.namespaceToProfile(&ns)
+			if err != nil {
+				panic(err)
+			}
+			rules, tags, labels := compat.ToTagsLabelsRules(profile)
+			snap = append(snap,
+				model.Update{KVPair: *rules, UpdateType: model.UpdateTypeKVNew},
+				model.Update{KVPair: *tags, UpdateType: model.UpdateTypeKVNew},
+				model.Update{KVPair: *labels, UpdateType: model.UpdateTypeKVNew},
+			)
 
-		// If this is the kube-system Namespace, also send
-		// the pool through. // TODO: Hacky.
-		if ns.ObjectMeta.Name == "kube-system" {
-			pool, _ := syn.kc.converter.namespaceToPool(&ns)
-			if pool != nil {
-				snap = append(snap, *pool)
+			// If this is the kube-system Namespace, also send
+			// the pool through. // TODO: Hacky.
+			if ns.ObjectMeta.Name == "kube-system" {
+				pool, _ := syn.kc.converter.namespaceToPool(&ns)
+				if pool != nil {
+					snap = append(snap, model.Update{KVPair: *pool, UpdateType: model.UpdateTypeKVNew})
+				}
 			}
 		}
-	}
 
-	// Get NetworkPolicies (Policies)
-	log.Info("Syncing NetworkPolicy")
-	npList, _ := syn.kc.clientSet.NetworkPolicies("").List(opts)
-	versions.networkPolicyVersion = npList.ListMeta.ResourceVersion
-	for _, np := range npList.Items {
-		pol, _ := syn.kc.converter.networkPolicyToPolicy(&np)
-		snap = append(snap, *pol)
-	}
-
-	// Get Pods (WorkloadEndpoints)
-	log.Info("Syncing Pods")
-	poList, _ := syn.kc.clientSet.Pods("").List(opts)
-	versions.podVersion = poList.ListMeta.ResourceVersion
-	for _, po := range poList.Items {
-		wep, _ := syn.kc.converter.podToWorkloadEndpoint(&po)
-		if wep != nil {
-			snap = append(snap, *wep)
+		// Get NetworkPolicies (Policies)
+		log.Info("Syncing NetworkPolicy")
+		npList, err := syn.kc.clientSet.NetworkPolicies("").List(opts)
+		if err != nil {
+			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
 		}
-	}
 
-	// Sync GlobalConfig
-	confList, _ := syn.kc.listGlobalConfig(model.GlobalConfigListOptions{})
-	for _, c := range confList {
-		snap = append(snap, *c)
-	}
+		versions.networkPolicyVersion = npList.ListMeta.ResourceVersion
+		for _, np := range npList.Items {
+			pol, _ := syn.kc.converter.networkPolicyToPolicy(&np)
+			snap = append(snap, model.Update{KVPair: *pol, UpdateType: model.UpdateTypeKVNew})
+		}
 
-	log.Infof("Snapshot resourceVersions: %+v", versions)
-	log.Debugf("Created snapshot: %+v", snap)
-	return &snap
+		// Get Pods (WorkloadEndpoints)
+		log.Info("Syncing Pods")
+		poList, err := syn.kc.clientSet.Pods("").List(opts)
+		if err != nil {
+			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		versions.podVersion = poList.ListMeta.ResourceVersion
+		for _, po := range poList.Items {
+			wep, _ := syn.kc.converter.podToWorkloadEndpoint(&po)
+			if wep != nil {
+				snap = append(snap, model.Update{KVPair: *wep, UpdateType: model.UpdateTypeKVNew})
+			}
+		}
+
+		// Sync GlobalConfig
+		confList, err := syn.kc.listGlobalConfig(model.GlobalConfigListOptions{})
+		if err != nil {
+			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		for _, c := range confList {
+			snap = append(snap, model.Update{KVPair: *c, UpdateType: model.UpdateTypeKVNew})
+		}
+
+		log.Infof("Snapshot resourceVersions: %+v", versions)
+		log.Debugf("Created snapshot: %+v", snap)
+		return &snap
+	}
 }
 
 // watchKubeAPI watches the Kubernetes API and sends updates to the merge thread.
 // If it encounters an error or falls behind, it triggers a new snapshot.
-func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
+func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.Update,
 	resyncChan chan *resourceVersions, initialVersionSource chan *resourceVersions) {
 
 	log.Info("Starting Kubernetes API watch worker")
 
 	// Wait for the initial resourceVersions to watch for.
+	log.Info("Waiting for initial snapshot to complete")
 	initialVersions := <-initialVersionSource
 	log.Infof("Received initialVersions: %+v", initialVersions)
 
@@ -245,10 +291,53 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 	poChan := poWatch.ResultChan()
 	npChan := npWatch.ResultChan()
 	var event watch.Event
-	var kvp *model.KVPair
+	var upd *model.Update
 	needsResync := false
 
+	log.Info("Starting Kubernetes API watch loop")
 	for {
+		// If we need to resync, do so.
+		if needsResync {
+			log.Warnf("Resync required - sending latest versions: %+v", latestVersions)
+			resyncChan <- latestVersions
+
+			// Wait to be told the new versions to watch.
+			log.Warn("Waiting for snapshot to complete")
+			latestVersions = <-initialVersionSource
+			log.Warnf("Snapshot complete after resync - start watch from %+v", latestVersions)
+
+			// Re-create the watches.
+			opts = k8sapi.ListOptions{ResourceVersion: initialVersions.namespaceVersion}
+			nsWatch, err = syn.kc.clientSet.Namespaces().Watch(opts)
+			if err != nil {
+				log.Warn("Failed to connect to API, retrying")
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			opts = k8sapi.ListOptions{ResourceVersion: initialVersions.podVersion}
+			poWatch, err = syn.kc.clientSet.Pods("").Watch(opts)
+			if err != nil {
+				log.Warn("Failed to connect to API, retrying")
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			opts = k8sapi.ListOptions{ResourceVersion: initialVersions.networkPolicyVersion}
+			npWatch, err = syn.kc.clientSet.NetworkPolicies("").Watch(opts)
+			if err != nil {
+				log.Warn("Failed to connect to API, retrying")
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			nsChan = nsWatch.ResultChan()
+			poChan = poWatch.ResultChan()
+			npChan = npWatch.ResultChan()
+
+			// Successfull resync - reset the flag.
+			needsResync = false
+		}
+
+		// Select on the various watch channels.
 		select {
 		case event = <-nsChan:
 			log.Debugf("Incoming Namespace watch event. Type=%s", event.Type)
@@ -260,15 +349,15 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			}
 
 			// Event is OK - parse it.
-			kvps := syn.parseNamespaceEvent(event)
-			for _, k := range kvps {
+			upds := syn.parseNamespaceEvent(event)
+			for _, k := range upds {
 				if k == nil {
 					// This can return nil when the event is not
 					// one we care about.
 					continue
 				}
 				updateChan <- k
-				latestVersions.namespaceVersion = k.Revision.(string)
+				latestVersions.namespaceVersion = k.KVPair.Revision.(string)
 			}
 			continue
 		case event = <-poChan:
@@ -281,11 +370,11 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			}
 
 			// Event is OK - parse it.
-			if kvp = syn.parsePodEvent(event); kvp != nil {
+			if upd = syn.parsePodEvent(event); upd != nil {
 				// Only send the update if we care about it.  We filter
 				// out a number of events that aren't useful for us.
-				latestVersions.podVersion = kvp.Revision.(string)
-				updateChan <- kvp
+				latestVersions.podVersion = upd.KVPair.Revision.(string)
+				updateChan <- upd
 			}
 		case event = <-npChan:
 			log.Debugf("Incoming NetworkPolicy watch event. Type=%s", event.Type)
@@ -297,22 +386,8 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.KVPair,
 			}
 
 			// Event is OK - parse it.
-			updateChan <- kvp
-			latestVersions.networkPolicyVersion = kvp.Revision.(string)
-		}
-
-		if needsResync {
-			// We broke out of the watch loop - trigger a resync.
-			log.Warnf("Resync required - sending latest versions: %+v", latestVersions)
-			resyncChan <- latestVersions
-
-			// Wait to be told the new versions to watch.
-			log.Warn("Waiting for snapshot to complete")
-			latestVersions = <-initialVersionSource
-			log.Warnf("Snapshot complete after resync - start watch from %+v", latestVersions)
-
-			// Reset the flag.
-			needsResync = false
+			updateChan <- upd
+			latestVersions.networkPolicyVersion = upd.KVPair.Revision.(string)
 		}
 	}
 }
@@ -328,7 +403,7 @@ func (syn *kubeSyncer) eventTriggersResync(e watch.Event) bool {
 	return false
 }
 
-func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) []*model.KVPair {
+func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) []*model.Update {
 	ns, ok := e.Object.(*k8sapi.Namespace)
 	if !ok {
 		panic(fmt.Sprintf("Invalid namespace event: %+v", e.Object))
@@ -357,7 +432,18 @@ func (syn *kubeSyncer) parseNamespaceEvent(e watch.Event) []*model.KVPair {
 		tags.Value = nil
 		labels.Value = nil
 	}
-	return []*model.KVPair{rules, tags, labels, pool}
+
+	// Return the updates.
+	updateType := getUpdateType(e)
+	updates := []*model.Update{
+		&model.Update{KVPair: *rules, UpdateType: updateType},
+		&model.Update{KVPair: *tags, UpdateType: updateType},
+		&model.Update{KVPair: *labels, UpdateType: updateType},
+	}
+	if pool != nil {
+		updates = append(updates, &model.Update{KVPair: *pool, UpdateType: updateType})
+	}
+	return updates
 }
 
 // labelCache stores labels for a given pod, so we can determine if
@@ -366,7 +452,7 @@ var labelCache map[string]map[string]string = map[string]map[string]string{}
 
 // parsePodEvent returns a KVPair for the given event.  If the event isn't
 // useful, parsePodEvent returns nil to indicate that there is nothing to do.
-func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
+func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.Update {
 	pod, ok := e.Object.(*k8sapi.Pod)
 	if !ok {
 		panic(fmt.Sprintf("Invalid pod event. Type: %s, Object: %+v", e.Type, e.Object))
@@ -415,10 +501,10 @@ func (syn *kubeSyncer) parsePodEvent(e watch.Event) *model.KVPair {
 		labelCache[workload] = labels
 	}
 
-	return kvp
+	return &model.Update{KVPair: *kvp, UpdateType: getUpdateType(e)}
 }
 
-func (syn *kubeSyncer) parseNetworkPolicyEvent(e watch.Event) *model.KVPair {
+func (syn *kubeSyncer) parseNetworkPolicyEvent(e watch.Event) *model.Update {
 	log.Debug("Parsing NetworkPolicy watch event")
 	// First, check the event type.
 	np, ok := e.Object.(*extensions.NetworkPolicy)
@@ -436,5 +522,5 @@ func (syn *kubeSyncer) parseNetworkPolicyEvent(e watch.Event) *model.KVPair {
 	if e.Type == watch.Deleted {
 		kvp.Value = nil
 	}
-	return kvp
+	return &model.Update{KVPair: *kvp, UpdateType: getUpdateType(e)}
 }
