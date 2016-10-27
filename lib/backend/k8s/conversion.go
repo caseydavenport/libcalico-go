@@ -45,6 +45,22 @@ type namespacePolicy struct {
 type converter struct {
 }
 
+// VethParamsForWorkload returns a deterministic veth name and MAC address
+// for the given Kubernetes workload.
+func VethParamsForWorkload(workload string) (string, net.HardwareAddr) {
+	// A SHA1 is always 20 bytes long, and so is sufficient for generating the
+	// veth name and mac addr.
+	h := sha1.New()
+	h.Write([]byte(workload))
+	vethName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
+
+	// Auto generate a MAC address for this pod.  The first byte is always
+	// 'ca' (202), which ensures the multicast bit isn't set (and is also the
+	// first two letters in Calico!)
+	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
+	return vethName, mac
+}
+
 // parseWorkloadID extracts the Namespace and Pod name from the given workload ID.
 func (c converter) parseWorkloadID(workloadID string) (string, string) {
 	splits := strings.SplitN(workloadID, ".", 2)
@@ -129,22 +145,6 @@ func (c converter) namespaceToProfile(ns *k8sapi.Namespace) (*model.KVPair, erro
 	return &kvp, nil
 }
 
-// VethParamsForWorkload returns a deterministic veth name and MAC address
-// for the given Kubernetes workload.
-func (c converter) VethParamsForWorkload(workload string) (string, net.HardwareAddr) {
-	// A SHA1 is always 20 bytes long, and so is sufficient for generating the
-	// veth name and mac addr.
-	h := sha1.New()
-	h.Write([]byte(workload))
-	vethName := fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
-
-	// Auto generate a MAC address for this pod.  The first byte is always
-	// 'ca' (202), which ensures the multicast bit isn't set (and is also the
-	// first two letters in Calico!)
-	mac := net.HardwareAddr(append([]byte{202}, h.Sum(nil)[:5]...))
-	return vethName, mac
-}
-
 func (c converter) isHostNetworked(pod *k8sapi.Pod) bool {
 	return pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.HostNetwork == true
 }
@@ -173,7 +173,7 @@ func (c converter) podToWorkloadEndpoint(pod *k8sapi.Pod) (*model.KVPair, error)
 
 	// Generate the interface name and MAC based on workload.  This must match
 	// the host-side veth configured by the CNI plugin.
-	interfaceName, mac := c.VethParamsForWorkload(workload)
+	interfaceName, mac := VethParamsForWorkload(workload)
 
 	// Build the labels map.
 	labels := pod.ObjectMeta.Labels
