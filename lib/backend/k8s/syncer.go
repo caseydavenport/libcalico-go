@@ -394,7 +394,8 @@ func (syn *kubeSyncer) watchKubeAPI(updateChan chan *model.Update,
 				break
 			}
 
-			// Event is OK - parse it.
+			// Event is OK - parse it and send it over the channel.
+			upd = syn.parseNetworkPolicyEvent(event)
 			updateChan <- upd
 			latestVersions.networkPolicyVersion = upd.KVPair.Revision.(string)
 		}
