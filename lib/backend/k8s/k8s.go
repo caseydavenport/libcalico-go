@@ -140,6 +140,8 @@ func (c *KubeClient) Get(k model.Key) (*model.KVPair, error) {
 		return c.getHostConfig(k.(model.HostConfigKey))
 	case model.GlobalConfigKey:
 		return c.getGlobalConfig(k.(model.GlobalConfigKey))
+	case model.ReadyFlagKey:
+		return c.getReadyStatus(k.(model.ReadyFlagKey))
 	default:
 		return nil, goerrors.New(fmt.Sprintf("Get unsupported for %+v", k))
 	}
@@ -363,6 +365,16 @@ func (c *KubeClient) getPolicy(k model.PolicyKey) (*model.KVPair, error) {
 		return nil, err
 	}
 	return c.converter.networkPolicyToPolicy(networkPolicy)
+}
+
+func (c *KubeClient) getReadyStatus(k model.ReadyFlagKey) (*model.KVPair, error) {
+	// See if we can connect to Kubernetes.
+	_, err := c.clientSet.Namespaces().List(k8sapi.ListOptions{})
+	if err != nil {
+		return &model.KVPair{Key: k, Value: false}, nil
+	}
+
+	return &model.KVPair{Key: k, Value: true}, nil
 }
 
 // TODO: What global config do we actually need to support?
