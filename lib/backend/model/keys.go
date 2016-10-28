@@ -19,11 +19,10 @@ import (
 	"reflect"
 	"strings"
 
-	net2 "net"
-	"time"
-
 	log "github.com/Sirupsen/logrus"
 	"github.com/projectcalico/libcalico-go/lib/net"
+	net2 "net"
+	"time"
 )
 
 // RawString is used a value type to indicate that the value is a bare non-JSON string
@@ -86,6 +85,21 @@ type KVPair struct {
 	Revision interface{}
 	TTL      time.Duration // For writes, if non-zero, key has a TTL.
 }
+
+// Update from the Syncer.  A KV pair plus extra metadata.
+type Update struct {
+	KVPair
+	UpdateType UpdateType
+}
+
+type UpdateType uint8
+
+const (
+	UpdateTypeKVUnknown UpdateType = iota
+	UpdateTypeKVNew
+	UpdateTypeKVUpdated
+	UpdateTypeKVDeleted
+)
 
 // KeyToDefaultPath converts one of the Keys from this package into a unique
 // '/'-delimited path, which is suitable for use as the key when storing the

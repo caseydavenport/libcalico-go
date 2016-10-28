@@ -73,14 +73,14 @@ type WorkloadEndpointSpec struct {
 
 	// A list of security Profile resources that apply to this endpoint. Each profile is
 	// applied in the order that they appear in this list.  Profile rules are applied
-	// after the label-based security policy.
+	// after the selector-based security policy.
 	Profiles []string `json:"profiles,omitempty" validate:"omitempty,dive,name"`
 
 	// InterfaceName the name of the Linux interface on the host: for example, tap80.
 	InterfaceName string `json:"interfaceName,omitempty" validate:"interface"`
 
 	// MAC is the MAC address of the endpoint interface.
-	MAC net.MAC `json:"mac,omitempty" validate:"omitempty,mac"`
+	MAC *net.MAC `json:"mac,omitempty" validate:"omitempty,mac"`
 }
 
 // IPNat contains a single NAT mapping for a WorkloadEndpoint resource.
