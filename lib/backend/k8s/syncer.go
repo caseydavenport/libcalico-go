@@ -237,7 +237,7 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) *[]model.Upda
 			}
 		}
 
-		// Sync GlobalConfig
+		// Sync GlobalConfig.
 		confList, err := syn.kc.listGlobalConfig(model.GlobalConfigListOptions{})
 		if err != nil {
 			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
@@ -248,6 +248,15 @@ func (syn *kubeSyncer) performSnapshot(versions *resourceVersions) *[]model.Upda
 		for _, c := range confList {
 			snap = append(snap, model.Update{KVPair: *c, UpdateType: model.UpdateTypeKVNew})
 		}
+
+		// Include ready state.
+		ready, err := syn.kc.getReadyStatus(model.ReadyFlagKey{})
+		if err != nil {
+			log.Warnf("Error accessing Kubernetes API, retrying: %s", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		snap = append(snap, model.Update{KVPair: *ready, UpdateType: model.UpdateTypeKVNew})
 
 		log.Infof("Snapshot resourceVersions: %+v", versions)
 		log.Debugf("Created snapshot: %+v", snap)
