@@ -699,6 +699,54 @@ var _ = Describe("Test NetworkPolicy conversion", func() {
 		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
 	})
 
+	It("should parse a default-allow egress NetworkPolicy", func() {
+		np := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "testPolicy",
+				Namespace: "default",
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+
+				// A single egress rule which allows everything.
+				Egress: []networkingv1.NetworkPolicyEgressRule{{}},
+			},
+		}
+
+		pol, err := c.K8sNetworkPolicyToCalico(&np)
+		By("parsing the policy", func() {
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		By("generating the correct name and namespace", func() {
+			Expect(pol.Key.(model.ResourceKey).Name).To(Equal("knp.default.testPolicy"))
+			Expect(pol.Key.(model.ResourceKey).Namespace).To(Equal("default"))
+		})
+
+		By("generating the correct selector", func() {
+			Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s'"))
+		})
+
+		By("generating the correct order", func() {
+			Expect(int(*pol.Value.(*apiv3.NetworkPolicy).Spec.Order)).To(Equal(1000))
+		})
+
+		By("generating no outbound rules", func() {
+			Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress)).To(Equal(1))
+			Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress[0]).To(Equal(apiv3.Rule{Action: apiv3.Allow}))
+		})
+
+		By("generating no inbound rules", func() {
+			Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress)).To(Equal(0))
+		})
+
+		By("generating the correct policy types", func() {
+			Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Types)).To(Equal(1))
+			Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeEgress))
+		})
+	})
+
 	It("should parse a default-deny egress NetworkPolicy", func() {
 		np := networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{
