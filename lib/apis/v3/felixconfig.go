@@ -92,6 +92,12 @@ type FelixConfigurationSpec struct {
 	// In most cases this should not need to be changed [Default: 8775].
 	MetadataPort *int `json:"metadataPort,omitempty"`
 
+	// OpenstackRegion is the name of the region that a particular Felix belongs to. In a multi-region
+	// Calico/OpenStack deployment, this must be configured somehow for each Felix (here in the datamodel,
+	// or in felix.cfg or the environment on each compute node), and must match the [calico]
+	// openstack_region value configured in neutron.conf on each node. [Default: Empty]
+	OpenstackRegion string `json:"openstackRegion,omitempty"`
+
 	// InterfacePrefix is the interface name prefix that identifies workload endpoints and so distinguishes
 	// them from host endpoint interfaces. Note: in environments other than bare metal, the orchestrators
 	// configure this appropriately. For example our Kubernetes and Docker integrations set the ‘cali’ value,
@@ -114,7 +120,7 @@ type FelixConfigurationSpec struct {
 	// endpoint to host, set this parameter to RETURN or ACCEPT. Use RETURN if you have your own rules in the iptables
 	// “INPUT” chain; Calico will insert its rules at the top of that chain, then “RETURN” packets to the “INPUT” chain
 	// once it has completed processing workload endpoint egress policy. Use ACCEPT to unconditionally accept packets
-	// from workloads after processing workload endpoint egress policy. [Default: DROP]
+	// from workloads after processing workload endpoint egress policy. [Default: Drop]
 	DefaultEndpointToHostAction string `json:"defaultEndpointToHostAction,omitempty" validate:"omitempty,dropAcceptReturn"`
 	IptablesFilterAllowAction   string `json:"iptablesFilterAllowAction,omitempty" validate:"omitempty,acceptReturn"`
 	IptablesMangleAllowAction   string `json:"iptablesMangleAllowAction,omitempty" validate:"omitempty,acceptReturn"`
@@ -124,12 +130,12 @@ type FelixConfigurationSpec struct {
 	// LogFilePath is the full path to the Felix log. Set to none to disable file logging. [Default: /var/log/calico/felix.log]
 	LogFilePath string `json:"logFilePath,omitempty"`
 
-	// LogSeverityFile is the log severity above which logs are sent to the log file. [Default: INFO]
+	// LogSeverityFile is the log severity above which logs are sent to the log file. [Default: Info]
 	LogSeverityFile string `json:"logSeverityFile,omitempty" validate:"omitempty,logLevel"`
-	// LogSeverityScreen is the log severity above which logs are sent to the stdout. [Default: INFO]
+	// LogSeverityScreen is the log severity above which logs are sent to the stdout. [Default: Info]
 	LogSeverityScreen string `json:"logSeverityScreen,omitempty" validate:"omitempty,logLevel"`
-	// LogSeveritySys is the log severity above which logs are sent to the syslog. Set to NONE for no logging to syslog.
-	// [Default: INFO]
+	// LogSeveritySys is the log severity above which logs are sent to the syslog. Set to None for no logging to syslog.
+	// [Default: Info]
 	LogSeveritySys string `json:"logSeveritySys,omitempty" validate:"omitempty,logLevel"`
 
 	IPIPEnabled *bool `json:"ipipEnabled,omitempty" confignamev1:"IpInIpEnabled"`
@@ -152,8 +158,10 @@ type FelixConfigurationSpec struct {
 
 	DisableConntrackInvalidCheck *bool `json:"disableConntrackInvalidCheck,omitempty"`
 
-	HealthEnabled *bool `json:"healthEnabled,omitempty"`
-	HealthPort    *int  `json:"healthPort,omitempty"`
+	HealthEnabled *bool   `json:"healthEnabled,omitempty"`
+	HealthHost    *string `json:"healthHost,omitempty"`
+	HealthPort    *int    `json:"healthPort,omitempty"`
+
 	// PrometheusMetricsEnabled enables the experimental Prometheus metrics server in Felix if set to true. [Default: false]
 	PrometheusMetricsEnabled *bool `json:"prometheusMetricsEnabled,omitempty"`
 	// PrometheusMetricsPort is the TCP port that the experimental Prometheus metrics server should bind to. [Default:9091]
@@ -182,6 +190,10 @@ type FelixConfigurationSpec struct {
 	// Felix uses these ranges to separate host and workload traffic. [Default: 30000:32767].
 	KubeNodePortRanges *[]numorstring.Port `json:"kubeNodePortRanges,omitempty" validate:"omitempty,dive"`
 
+	// PolicySyncPathPrefix is used to by Felix to communicate policy changes to external services,
+	// like Application layer policy. [Default: Empty]
+	PolicySyncPathPrefix string `json:"policySyncPathPrefix,omitempty"`
+
 	// UsageReportingEnabled reports anonymous Calico version number and cluster size to projectcalico.org. Logs warnings returned by the usage
 	// server. For example, if a significant security vulnerability has been discovered in the version of Calico being used. [Default: true]
 	UsageReportingEnabled *bool `json:"usageReportingEnabled,omitempty"`
@@ -189,6 +201,14 @@ type FelixConfigurationSpec struct {
 	UsageReportingInitialDelay *metav1.Duration `json:"usageReportingInitialDelay,omitempty" configv1timescale:"seconds" confignamev1:"UsageReportingInitialDelaySecs"`
 	// UsageReportingInterval controls the interval at which Felix makes reports. [Default: 86400s]
 	UsageReportingInterval *metav1.Duration `json:"usageReportingInterval,omitempty" configv1timescale:"seconds" confignamev1:"UsageReportingIntervalSecs"`
+
+	// NATPortRange specifies the range of ports that is used for port mapping when doing outgoing NAT. When unset the default behavior of the
+	// network stack is used.
+	NATPortRange *numorstring.Port `json:"natPortRange,omitempty"`
+
+	// ExternalNodesCIDRList is a list of CIDR's of external-non-calico-nodes which may source tunnel traffic and have
+	// the tunneled traffic be accepted at calico nodes.
+	ExternalNodesCIDRList *[]string `json:"externalNodesList,omitempty"`
 
 	DebugMemoryProfilePath          string           `json:"debugMemoryProfilePath,omitempty"`
 	DebugDisableLogDropping         *bool            `json:"debugDisableLogDropping,omitempty"`

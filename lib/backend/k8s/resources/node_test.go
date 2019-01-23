@@ -77,6 +77,57 @@ var _ = Describe("Test Node conversion", func() {
 		Expect(asn.String()).To(Equal("2546"))
 	})
 
+	It("should parse a k8s Node to a Calico Node with RR cluster ID", func() {
+		l := map[string]string{"net.beta.kubernetes.io/role": "master"}
+		node := k8sapi.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "TestNode",
+				Labels:          l,
+				ResourceVersion: "1234",
+				Annotations: map[string]string{
+					nodeBgpIpv4AddrAnnotation: "172.17.17.10",
+					nodeBgpAsnAnnotation:      "2546",
+					nodeBgpCIDAnnotation:      "248.0.4.5",
+				},
+			},
+			Status: k8sapi.NodeStatus{
+				Addresses: []k8sapi.NodeAddress{
+					k8sapi.NodeAddress{
+						Type:    k8sapi.NodeInternalIP,
+						Address: "172.17.17.10",
+					},
+					k8sapi.NodeAddress{
+						Type:    k8sapi.NodeExternalIP,
+						Address: "192.168.1.100",
+					},
+					k8sapi.NodeAddress{
+						Type:    k8sapi.NodeHostName,
+						Address: "172-17-17-10",
+					},
+				},
+			},
+			Spec: k8sapi.NodeSpec{
+				PodCIDR: "10.0.0.1/24",
+			},
+		}
+
+		n, err := K8sNodeToCalico(&node)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Ensure we got the correct values.
+		bgpIpv4Address := n.Value.(*apiv3.Node).Spec.BGP.IPv4Address
+		ipInIpAddr := n.Value.(*apiv3.Node).Spec.BGP.IPv4IPIPTunnelAddr
+		asn := n.Value.(*apiv3.Node).Spec.BGP.ASNumber
+		rrClusterID := n.Value.(*apiv3.Node).Spec.BGP.RouteReflectorClusterID
+
+		ip := net.ParseIP("172.17.17.10")
+
+		Expect(bgpIpv4Address).To(Equal(ip.String()))
+		Expect(ipInIpAddr).To(Equal("10.0.0.2"))
+		Expect(asn.String()).To(Equal("2546"))
+		Expect(rrClusterID).To(Equal("248.0.4.5"))
+	})
+
 	It("should parse a k8s Node to a Calico Node with IPv6", func() {
 		l := map[string]string{"net.beta.kubernetes.io/role": "master"}
 		node := k8sapi.Node{
@@ -235,9 +286,10 @@ var _ = Describe("Test Node conversion", func() {
 		calicoNode.Annotations = ca
 		calicoNode.Spec = apiv3.NodeSpec{
 			BGP: &apiv3.NodeBGPSpec{
-				IPv4Address: "172.17.17.10/24",
-				IPv6Address: "aa:bb:cc::ffff/120",
-				ASNumber:    &asn,
+				IPv4Address:             "172.17.17.10/24",
+				IPv6Address:             "aa:bb:cc::ffff/120",
+				ASNumber:                &asn,
+				RouteReflectorClusterID: "245.0.0.3",
 			},
 		}
 
@@ -246,6 +298,7 @@ var _ = Describe("Test Node conversion", func() {
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpIpv4AddrAnnotation, "172.17.17.10/24"))
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpIpv6AddrAnnotation, "aa:bb:cc::ffff/120"))
 		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpAsnAnnotation, "2456"))
+		Expect(newK8sNode.Annotations).To(HaveKeyWithValue(nodeBgpCIDAnnotation, "245.0.0.3"))
 
 		// The calico node annotations and labels should not have escaped directly into the node annotations
 		// and labels.
@@ -258,6 +311,87 @@ var _ = Describe("Test Node conversion", func() {
 		calicoNode.Spec.BGP.IPv4IPIPTunnelAddr = "172.100.0.1"
 		newCalicoNode, err := K8sNodeToCalico(newK8sNode)
 		Expect(err).NotTo(HaveOccurred())
-		Expect(newCalicoNode.Value).To(Equal(calicoNode))
+
+		calicoNodeWithMergedLabels := calicoNode.DeepCopy()
+		calicoNodeWithMergedLabels.Annotations[nodeK8sLabelAnnotation] = "{\"net.beta.kubernetes.io/role\":\"master\"}"
+		calicoNodeWithMergedLabels.Labels["net.beta.kubernetes.io/role"] = "master"
+		Expect(newCalicoNode.Value).To(Equal(calicoNodeWithMergedLabels))
+	})
+
+	It("Should shadow labels correctly", func() {
+		kl := map[string]string{
+			"net.beta.kubernetes.io/role": "master",
+			"shadowed":                    "k8s-value",
+		}
+		cl := map[string]string{
+			"label1":   "foo",
+			"label2":   "bar",
+			"shadowed": "calico-value",
+		}
+		k8sNode := &k8sapi.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "TestNode",
+				Labels:          kl,
+				ResourceVersion: "1234",
+				Annotations:     make(map[string]string),
+			},
+			Spec: k8sapi.NodeSpec{},
+		}
+
+		By("Merging calico node config into the k8s node")
+		calicoNode := apiv3.NewNode()
+		calicoNode.Name = "TestNode"
+		calicoNode.ResourceVersion = "1234"
+		calicoNode.Labels = cl
+
+		newK8sNode, err := mergeCalicoNodeIntoK8sNode(calicoNode, k8sNode)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(newK8sNode.Annotations).To(Equal(map[string]string{
+			"projectcalico.org/labels": `{"label1":"foo","label2":"bar","shadowed":"calico-value"}`,
+		}))
+		Expect(newK8sNode.Labels).To(Equal(kl))
+
+		By("Converting the k8s node back into a calico node")
+		newCalicoNode, err := K8sNodeToCalico(newK8sNode)
+		Expect(err).NotTo(HaveOccurred())
+
+		// When we merge k8s into Calico, the k8s labels get stashed in an annotation along with the shadowed labels:
+		calicoNodeWithMergedLabels := calicoNode.DeepCopy()
+		calicoNodeWithMergedLabels.Annotations = map[string]string{}
+		calicoNodeWithMergedLabels.Annotations[nodeK8sLabelAnnotation] = "{\"net.beta.kubernetes.io/role\":\"master\",\"shadowed\":\"k8s-value\"}"
+		// And, the k8s labels get merged in...
+		calicoNodeWithMergedLabels.Labels["net.beta.kubernetes.io/role"] = "master"
+		calicoNodeWithMergedLabels.Labels["shadowed"] = "k8s-value"
+		Expect(newCalicoNode.Value).To(Equal(calicoNodeWithMergedLabels))
+
+		// restoreCalicoLabels should undo the merge, but the shadowed label will be lost.
+		calicoNodeNoShadow := calicoNode.DeepCopy()
+		delete(calicoNodeNoShadow.Labels, "shadowed")
+		calicoNodeRestored, err := restoreCalicoLabels(calicoNodeWithMergedLabels)
+		Expect(calicoNodeRestored).To(Equal(calicoNodeNoShadow))
+
+		// For coverage, make a change to the shadowed label, this will log a warning.
+		calicoNodeWithMergedLabels.Labels["shadowed"] = "some change"
+		calicoNodeRestored, err = restoreCalicoLabels(calicoNodeWithMergedLabels)
+		Expect(calicoNodeRestored).To(Equal(calicoNodeNoShadow))
+	})
+
+	It("restoreCalicoLabels should error if annotations are malformed", func() {
+		calicoNode := apiv3.NewNode()
+		calicoNode.Annotations = map[string]string{}
+		calicoNode.Annotations[nodeK8sLabelAnnotation] = "Garbage"
+		_, err := restoreCalicoLabels(calicoNode)
+		Expect(err).To(HaveOccurred())
+
+		k8sNode := &k8sapi.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "TestNode",
+				ResourceVersion: "1234",
+				Annotations:     make(map[string]string),
+			},
+			Spec: k8sapi.NodeSpec{},
+		}
+		_, err = mergeCalicoNodeIntoK8sNode(calicoNode, k8sNode)
+		Expect(err).To(HaveOccurred())
 	})
 })

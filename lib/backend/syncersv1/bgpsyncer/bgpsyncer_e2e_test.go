@@ -59,7 +59,7 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 			// Create a SyncerTester to receive the BGP syncer callback events and to allow us
 			// to assert state.
 			syncTester := testutils.NewSyncerTester()
-			syncer := bgpsyncer.New(be, syncTester, "127.0.0.1", true)
+			syncer := bgpsyncer.New(be, syncTester, "127.0.0.1")
 			syncer.Start()
 			expectedCacheSize := 0
 
@@ -68,29 +68,19 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 			syncTester.ExpectCacheSize(expectedCacheSize)
 			syncTester.ExpectStatusUpdate(api.ResyncInProgress)
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
-				// k8s seems to have some latency with its API server, so let's pause for a little
-				// to let things settle.
-				expectedCacheSize += 3
+				expectedCacheSize += 2
 			}
 			syncTester.ExpectCacheSize(expectedCacheSize)
 			syncTester.ExpectStatusUpdate(api.InSync)
 			syncTester.ExpectCacheSize(expectedCacheSize)
 
-			// For Kubernetes test the three entries already in the cache - one
-			// affinity block and two blank IP addresses from the pre-provisioned node.
+			// For Kubernetes test the two entries already in the cache - one
+			// affinity block and one node.
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
-				// We don't compare the revision number since it's not hugely stable.
-				syncTester.ExpectData(model.KVPair{
-					Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "ip_addr_v4"},
-					Value: "",
-				})
-				syncTester.ExpectData(model.KVPair{
-					Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "ip_addr_v6"},
-					Value: "",
-				})
+				syncTester.ExpectPath("/calico/resources/v3/projectcalico.org/nodes/127.0.0.1")
 				syncTester.ExpectData(model.KVPair{
 					Key:   model.BlockAffinityKey{Host: "127.0.0.1", CIDR: net.MustParseCIDR("10.10.10.0/24")},
-					Value: "{}",
+					Value: &model.BlockAffinity{State: model.StateConfirmed},
 				})
 			}
 
@@ -137,9 +127,7 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 				node, err = c.Nodes().Update(ctx, node, options.SetOptions{})
 				Expect(err).NotTo(HaveOccurred())
 
-				// This will add two network entries, and the existing two IP entries will be
-				// updated.
-				expectedCacheSize += 2
+				// The existing Node resource is updated; no change in cache size.
 			} else {
 				// For non-Kubernetes, add a new node with valid BGP configuration.
 				By("Creating a node with BGP configuration")
@@ -157,27 +145,11 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 					options.SetOptions{},
 				)
 				Expect(err).NotTo(HaveOccurred())
-				// The two IP addresses will also add two networks ( +4 )
-				expectedCacheSize += 4
+				expectedCacheSize += 1
 			}
 
 			syncTester.ExpectCacheSize(expectedCacheSize)
-			syncTester.ExpectData(model.KVPair{
-				Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "ip_addr_v4"},
-				Value: "1.2.3.4",
-			})
-			syncTester.ExpectData(model.KVPair{
-				Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "ip_addr_v6"},
-				Value: "aa:bb::cc",
-			})
-			syncTester.ExpectData(model.KVPair{
-				Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "network_v4"},
-				Value: "1.2.3.0/24",
-			})
-			syncTester.ExpectData(model.KVPair{
-				Key:   model.NodeBGPConfigKey{Nodename: "127.0.0.1", Name: "network_v6"},
-				Value: "aa:bb::/120",
-			})
+			syncTester.ExpectPath("/calico/resources/v3/projectcalico.org/nodes/127.0.0.1")
 
 			By("Updating the BGPConfiguration to remove the default ASNumber")
 			bgpCfg.Spec.ASNumber = nil
@@ -222,7 +194,7 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 			})
 
 			By("Creating a BGPPeer")
-			peer1, err := c.BGPPeers().Create(
+			_, err = c.BGPPeers().Create(
 				ctx,
 				&apiv3.BGPPeer{
 					ObjectMeta: metav1.ObjectMeta{Name: "peer1"},
@@ -234,74 +206,26 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 				options.SetOptions{},
 			)
 			Expect(err).NotTo(HaveOccurred())
-			peer1kvp := model.KVPair{
-				Key: model.GlobalBGPPeerKey{PeerIP: net.MustParseIP("192.124.10.20")},
-				Value: &model.BGPPeer{
-					PeerIP: net.MustParseIP("192.124.10.20"),
-					ASNum:  numorstring.ASNumber(75758),
-				},
-				Revision: peer1.ResourceVersion,
-			}
+
 			// The peer will add as single entry ( +1 )
 			expectedCacheSize += 1
 			syncTester.ExpectCacheSize(expectedCacheSize)
-			syncTester.ExpectData(peer1kvp)
-
-			By("Adding a new BGPPeer with conflicting peer IP (and lower priority than the first one)")
-			peer2, err := c.BGPPeers().Create(
-				ctx,
-				&apiv3.BGPPeer{
-					ObjectMeta: metav1.ObjectMeta{Name: "peer9-lowerpriority"},
-					Spec: apiv3.BGPPeerSpec{
-						PeerIP:   "192.124.10.20",
-						ASNumber: numorstring.ASNumber(99999),
-					},
-				},
-				options.SetOptions{},
-			)
-			Expect(err).NotTo(HaveOccurred())
-			peer2kvp := model.KVPair{
-				Key: model.GlobalBGPPeerKey{PeerIP: net.MustParseIP("192.124.10.20")},
-				Value: &model.BGPPeer{
-					PeerIP: net.MustParseIP("192.124.10.20"),
-					ASNum:  numorstring.ASNumber(99999),
-				},
-				Revision: peer2.ResourceVersion,
-			}
-			// The peer will result in no updates and the entry key off 192.124.10.20
-			// will still be the same.
-			syncTester.ExpectCacheSize(expectedCacheSize)
-			syncTester.ExpectData(peer1kvp)
-
-			By("Updating the first peer to be a Node specific peer (get updates for both peers)")
-			peer1.Spec.Node = "127.0.0.1"
-			peer1, err = c.BGPPeers().Update(ctx, peer1, options.SetOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			peer1kvp = model.KVPair{
-				Key: model.NodeBGPPeerKey{Nodename: "127.0.0.1", PeerIP: net.MustParseIP("192.124.10.20")},
-				Value: &model.BGPPeer{
-					PeerIP: net.MustParseIP("192.124.10.20"),
-					ASNum:  numorstring.ASNumber(75758),
-				},
-				Revision: peer1.ResourceVersion,
-			}
-
-			// The first peer has moved to be a node-specific peer and no longer clashes with
-			// the second.  We should have an extra data store entry, and both peers should be present.
-			expectedCacheSize += 1
-			syncTester.ExpectCacheSize(expectedCacheSize)
-			syncTester.ExpectData(peer1kvp)
-			syncTester.ExpectData(peer2kvp)
+			syncTester.ExpectPath("/calico/resources/v3/projectcalico.org/bgppeers/peer1")
 
 			// For non-kubernetes, check that we can allocate an IP address and get a syncer update
 			// for the allocation block.
 			var blockAffinityKeyV1 model.BlockAffinityKey
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Allocating an IP address and checking that we get an allocation block")
-				ips1, _, err := c.IPAM().AutoAssign(ctx, ipam.AutoAssignArgs{
+				ipV4Nets1, _, err := c.IPAM().AutoAssign(ctx, ipam.AutoAssignArgs{
 					Num4:     1,
 					Hostname: "127.0.0.1",
 				})
+
+				var ips1 []net.IP
+				for _, ipnet := range ipV4Nets1 {
+					ips1 = append(ips1, net.IP{ipnet.IP})
+				}
 				Expect(err).NotTo(HaveOccurred())
 
 				// Allocating an IP will create an affinity block that we should be notified of.  Not sure
@@ -322,10 +246,22 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 				By("Allocating an IP address on a different host and checking for no updates")
 				// The syncer only monitors affine blocks for one host, so IP allocations for a different
 				// host should not result in updates.
-				ips2, _, err := c.IPAM().AutoAssign(ctx, ipam.AutoAssignArgs{
+				hostname := "not-this-host"
+				node, err = c.Nodes().Create(ctx, &apiv3.Node{ObjectMeta: metav1.ObjectMeta{Name: hostname}}, options.SetOptions{})
+				Expect(err).NotTo(HaveOccurred())
+				expectedCacheSize += 1
+				syncTester.ExpectCacheSize(expectedCacheSize)
+
+				ipV4Nets2, _, err := c.IPAM().AutoAssign(ctx, ipam.AutoAssignArgs{
 					Num4:     1,
-					Hostname: "not-this-host",
+					Hostname: hostname,
 				})
+
+				var ips2 []net.IP
+				for _, ipnet := range ipV4Nets2 {
+					ips2 = append(ips2, net.IP{ipnet.IP})
+				}
+
 				Expect(err).NotTo(HaveOccurred())
 				syncTester.ExpectCacheSize(expectedCacheSize)
 
@@ -354,7 +290,7 @@ var _ = testutils.E2eDatastoreDescribe("BGP syncer tests", testutils.DatastoreAl
 			// We need to create a new syncTester and syncer.
 			current := syncTester.GetCacheEntries()
 			syncTester = testutils.NewSyncerTester()
-			syncer = bgpsyncer.New(be, syncTester, "127.0.0.1", true)
+			syncer = bgpsyncer.New(be, syncTester, "127.0.0.1")
 			syncer.Start()
 
 			// Verify the data is the same as the data from the previous cache.  We got the cache in the previous

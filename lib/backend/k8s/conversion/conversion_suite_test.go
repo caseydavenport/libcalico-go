@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2018 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,11 +17,16 @@ package conversion_test
 import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/projectcalico/libcalico-go/lib/testutils"
 
 	"testing"
+
+	"github.com/onsi/ginkgo/reporters"
 )
 
 func TestConversion(t *testing.T) {
+	testutils.HookLogrusForGinkgo()
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Conversion Suite")
+	junitReporter := reporters.NewJUnitReporter("../../../../report/conversion_suite.xml")
+	RunSpecsWithDefaultAndCustomReporters(t, "Conversion Suite", []Reporter{junitReporter})
 }

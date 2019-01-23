@@ -17,7 +17,9 @@ package conversion
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -46,10 +48,7 @@ const (
 )
 
 //TODO: make this private and expose a public conversion interface instead
-type Converter struct {
-	// AlphaSA set to true if the alpha feature for serviceaccounts is enabled.
-	AlphaSA bool
-}
+type Converter struct{}
 
 // VethNameForWorkload returns a deterministic veth name
 // for the given Kubernetes workload (WEP) name and namespace.
@@ -58,7 +57,17 @@ func VethNameForWorkload(namespace, podname string) string {
 	// veth name and mac addr.
 	h := sha1.New()
 	h.Write([]byte(fmt.Sprintf("%s.%s", namespace, podname)))
-	return fmt.Sprintf("cali%s", hex.EncodeToString(h.Sum(nil))[:11])
+	prefix := os.Getenv("FELIX_INTERFACEPREFIX")
+	if prefix == "" {
+		// Prefix is not set. Default to "cali"
+		prefix = "cali"
+	} else {
+		// Prefix is set - use the first value in the list.
+		splits := strings.Split(prefix, ",")
+		prefix = splits[0]
+	}
+	log.WithField("prefix", prefix).Debugf("Using prefix to create a WorkloadEndpoint veth name")
+	return fmt.Sprintf("%s%s", prefix, hex.EncodeToString(h.Sum(nil))[:11])
 }
 
 // ParseWorkloadName extracts the Node name, Orchestrator, Pod name and endpoint from the
@@ -183,7 +192,7 @@ func (c Converter) PodToWorkloadEndpoint(pod *kapiv1.Pod) (*model.KVPair, error)
 	profiles = append(profiles, NamespaceProfileNamePrefix+pod.Namespace)
 
 	// Pull out the Serviceaccount based profile off the pod SA and namespace
-	if c.AlphaSA && pod.Spec.ServiceAccountName != "" {
+	if pod.Spec.ServiceAccountName != "" {
 		profiles = append(profiles, serviceAccountNameToProfileName(pod.Spec.ServiceAccountName, pod.Namespace))
 	}
 
@@ -218,8 +227,39 @@ func (c Converter) PodToWorkloadEndpoint(pod *kapiv1.Pod) (*model.KVPair, error)
 	labels[apiv3.LabelNamespace] = pod.Namespace
 	labels[apiv3.LabelOrchestrator] = apiv3.OrchestratorKubernetes
 
-	if c.AlphaSA && pod.Spec.ServiceAccountName != "" {
+	if pod.Spec.ServiceAccountName != "" {
 		labels[apiv3.LabelServiceAccount] = pod.Spec.ServiceAccountName
+	}
+
+	// Pull out floating IP annotation
+	var floatingIPs []apiv3.IPNAT
+	if annotation, ok := pod.Annotations["cni.projectcalico.org/floatingIPs"]; ok && len(ipNets) > 0 {
+
+		// Parse Annotation data
+		var ips []string
+		err := json.Unmarshal([]byte(annotation), &ips)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse '%s' as JSON: %s", annotation, err)
+		}
+
+		// Get target for NAT
+		podip, podnet, err := cnet.ParseCIDROrIP(ipNets[0])
+		if err != nil {
+			return nil, fmt.Errorf("Failed to parse pod IP: %s", err)
+		}
+
+		netmask, _ := podnet.Mask.Size()
+
+		if netmask != 32 && netmask != 128 {
+			return nil, fmt.Errorf("PodIP is not a valid IP: Mask size is %d, not 32 or 128", netmask)
+		}
+
+		for _, ip := range ips {
+			floatingIPs = append(floatingIPs, apiv3.IPNAT{
+				InternalIP: podip.String(),
+				ExternalIP: ip,
+			})
+		}
 	}
 
 	// Map any named ports through.
@@ -259,6 +299,7 @@ func (c Converter) PodToWorkloadEndpoint(pod *kapiv1.Pod) (*model.KVPair, error)
 		CreationTimestamp: pod.CreationTimestamp,
 		UID:               pod.UID,
 		Labels:            labels,
+		GenerateName:      pod.GenerateName,
 	}
 	wep.Spec = apiv3.WorkloadEndpointSpec{
 		Orchestrator:  "k8s",
@@ -269,6 +310,7 @@ func (c Converter) PodToWorkloadEndpoint(pod *kapiv1.Pod) (*model.KVPair, error)
 		Profiles:      profiles,
 		IPNetworks:    ipNets,
 		Ports:         endpointPorts,
+		IPNATs:        floatingIPs,
 	}
 
 	// Embed the workload endpoint into a KVPair.
@@ -381,6 +423,17 @@ func (c Converter) k8sSelectorToCalico(s *metav1.LabelSelector, selectorType sel
 	selectors := []string{}
 	if selectorType == SelectorPod {
 		selectors = append(selectors, fmt.Sprintf("%s == 'k8s'", apiv3.LabelOrchestrator))
+	}
+
+	if s == nil {
+		return strings.Join(selectors, " && ")
+	}
+
+	// For namespace selectors, if they are present but have no terms, it means "select all
+	// namespaces". We use empty string to represent the nil namespace selector, so use all() to
+	// represent all namespaces.
+	if selectorType == SelectorNamespace && len(s.MatchLabels) == 0 && len(s.MatchExpressions) == 0 {
+		return "all()"
 	}
 
 	// matchLabels is a map key => value, it means match if (label[key] ==
@@ -532,16 +585,6 @@ func (c Converter) k8sPeerToCalicoFields(peer *networkingv1.NetworkPolicyPeer, n
 	}
 	// Peer information available.
 	// Determine the source selector for the rule.
-	// Only one of PodSelector / NamespaceSelector can be defined.
-	if peer.PodSelector != nil {
-		selector = c.k8sSelectorToCalico(peer.PodSelector, SelectorPod)
-		return
-	}
-	if peer.NamespaceSelector != nil {
-		nsSelector = c.k8sSelectorToCalico(peer.NamespaceSelector, SelectorNamespace)
-		selector = fmt.Sprintf("%s == 'k8s'", apiv3.LabelOrchestrator)
-		return
-	}
 	if peer.IPBlock != nil {
 		// Convert the CIDR to include.
 		_, ipNet, err := cnet.ParseCIDR(peer.IPBlock.CIDR)
@@ -561,8 +604,14 @@ func (c Converter) k8sPeerToCalicoFields(peer *networkingv1.NetworkPolicyPeer, n
 			}
 			notNets = append(notNets, ipNet.String())
 		}
+		// If IPBlock is set, then PodSelector and NamespaceSelector cannot be.
 		return
 	}
+
+	// IPBlock is not set to get here.
+	// Note that k8sSelectorToCalico() accepts nil values of the selector.
+	selector = c.k8sSelectorToCalico(peer.PodSelector, SelectorPod)
+	nsSelector = c.k8sSelectorToCalico(peer.NamespaceSelector, SelectorNamespace)
 	return
 }
 
@@ -685,10 +734,6 @@ func (c Converter) ProfileNameToServiceAccount(profileName string) (ns, sa strin
 // revisions.
 // This is conditional on the feature flag for serviceaccount set or not.
 func (c Converter) JoinProfileRevisions(nsRev, saRev string) string {
-	if c.AlphaSA == false {
-		return nsRev
-	}
-
 	return nsRev + "/" + saRev
 }
 
@@ -697,11 +742,6 @@ func (c Converter) JoinProfileRevisions(nsRev, saRev string) string {
 // This is conditional on the feature flag for serviceaccount set or not.
 func (c Converter) SplitProfileRevision(rev string) (nsRev string, saRev string, err error) {
 	if rev == "" {
-		return
-	}
-
-	if c.AlphaSA == false {
-		nsRev = rev
 		return
 	}
 

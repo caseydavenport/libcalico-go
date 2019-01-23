@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2018 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,18 +26,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/projectcalico/libcalico-go/lib/apiconfig"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/k8s/conversion"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 )
 
-func NewProfileClient(c *kubernetes.Clientset, af string) K8sResourceClient {
-	alphaSA := apiconfig.IsAlphaFeatureSet(af, apiconfig.AlphaFeatureSA)
+func NewProfileClient(c *kubernetes.Clientset) K8sResourceClient {
 	return &profileClient{
 		clientSet: c,
-		Converter: conversion.Converter{AlphaSA: alphaSA},
+		Converter: conversion.Converter{},
 	}
 }
 
@@ -130,15 +128,15 @@ func (c *profileClient) Get(ctx context.Context, key model.Key, revision string)
 		return nil, err
 	}
 
-	if strings.HasPrefix(rk.Name, conversion.NamespaceProfileNamePrefix) {
+	splits := strings.SplitAfterN(rk.Name, ".", 2)
+	if len(splits) == 1 {
+		return nil, fmt.Errorf("Invalid name %s", rk.Name)
+	}
+
+	switch splits[0] {
+	case conversion.NamespaceProfileNamePrefix:
 		return c.getNamespace(ctx, rk, nsRev)
-	}
-
-	if c.AlphaSA == false {
-		return nil, fmt.Errorf("Revision %s invalid", revision)
-	}
-
-	if strings.HasPrefix(rk.Name, conversion.ServiceAccountProfileNamePrefix) {
+	case conversion.ServiceAccountProfileNamePrefix:
 		return c.getServiceAccount(ctx, rk, saRev)
 	}
 
@@ -191,13 +189,6 @@ func (c *profileClient) List(ctx context.Context, list model.ListInterface, revi
 		kvps = append(kvps, kvp)
 	}
 
-	if c.AlphaSA == false {
-		return &model.KVPairList{
-			KVPairs:  kvps,
-			Revision: namespaces.ResourceVersion,
-		}, nil
-	}
-
 	// Enumerate all SA
 	var serviceaccounts *kapiv1.ServiceAccountList
 	// TBD: narrow down to only to the required namespace
@@ -236,12 +227,10 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
 		return nil, err
 	}
 
-	if c.AlphaSA {
-		log.WithFields(log.Fields{
-			"nsRev": nsRev,
-			"saRev": saRev,
-		}).Info("Watching two resources at individual revisions")
-	}
+	log.WithFields(log.Fields{
+		"nsRev": nsRev,
+		"saRev": saRev,
+	}).Debug("Watching two resources at individual revisions")
 
 	nsWatch, err := c.clientSet.CoreV1().Namespaces().Watch(metav1.ListOptions{ResourceVersion: nsRev})
 	if err != nil {
@@ -256,10 +245,6 @@ func (c *profileClient) Watch(ctx context.Context, list model.ListInterface, rev
 	}
 
 	nsWatcher := newK8sWatcherConverter(ctx, "Profile-NS", converter, nsWatch)
-
-	if c.AlphaSA == false {
-		return nsWatcher, nil
-	}
 
 	// Watch all service accounts in ALL namespaces
 	saWatch, err := c.clientSet.CoreV1().ServiceAccounts(kapiv1.NamespaceAll).Watch(metav1.ListOptions{ResourceVersion: saRev})
@@ -291,7 +276,7 @@ func newProfileWatcher(ctx context.Context, k8sWatchNS, k8sWatchSA api.WatchInte
 		context:    ctx,
 		cancel:     cancel,
 		resultChan: make(chan api.WatchEvent, resultsBufSize),
-		Converter:  conversion.Converter{AlphaSA: true},
+		Converter:  conversion.Converter{},
 	}
 	go wc.processProfileEvents()
 	return wc
@@ -340,9 +325,9 @@ func (pw *profileWatcher) HasTerminated() bool {
 // Loop to process the events stream from the underlying k8s Watcher and convert them to
 // backend KVPs.
 func (pw *profileWatcher) processProfileEvents() {
-	log.Info("Watcher process started for profile.")
+	log.Debug("Watcher process started for profile.")
 	defer func() {
-		log.Info("Profile watcher process terminated")
+		log.Debug("Profile watcher process terminated")
 		pw.Stop()
 		close(pw.resultChan)
 		atomic.AddUint32(&pw.terminated, 1)
@@ -386,7 +371,7 @@ func (pw *profileWatcher) processProfileEvents() {
 			isNsEvent = false
 
 		case <-pw.context.Done(): //user cancel
-			log.Info("Process watcher done event in kdd client")
+			log.Debug("Process watcher done event in kdd client")
 			return
 		}
 
@@ -435,13 +420,13 @@ func (pw *profileWatcher) processProfileEvents() {
 			if e.Type == api.WatchError {
 				log.WithError(e.Error).Debug("Kubernetes event converted to backend watcher error event")
 				if _, ok := e.Error.(cerrors.ErrorWatchTerminated); ok {
-					log.Info("Watch terminated event")
+					log.Debug("Watch terminated event")
 					return
 				}
 			}
 
 		case <-pw.context.Done():
-			log.Info("Process watcher done event during watch event in kdd client")
+			log.Debug("Process watcher done event during watch event in kdd client")
 			return
 		}
 	}

@@ -17,11 +17,13 @@ package ipam
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"math/big"
 	"math/rand"
 	"net"
 
+	"github.com/projectcalico/libcalico-go/lib/apis/v3"
 	log "github.com/sirupsen/logrus"
 
 	bapi "github.com/projectcalico/libcalico-go/lib/backend/api"
@@ -35,52 +37,66 @@ type blockReaderWriter struct {
 	pools  PoolAccessorInterface
 }
 
-func (rw blockReaderWriter) getAffineBlocks(ctx context.Context, host string, ver ipVersion, pools []cnet.IPNet) ([]cnet.IPNet, error) {
+func (rw blockReaderWriter) getAffineBlocks(ctx context.Context, host string, ver int, pools []v3.IPPool) (blocksInPool, blocksNotInPool []cnet.IPNet, err error) {
+	blocksInPool = []cnet.IPNet{}
+	blocksNotInPool = []cnet.IPNet{}
+
 	// Lookup all blocks by providing an empty BlockListOptions
 	// to the List operation.
-	opts := model.BlockAffinityListOptions{Host: host, IPVersion: ver.Number}
+	opts := model.BlockAffinityListOptions{Host: host, IPVersion: ver}
 	datastoreObjs, err := rw.client.List(ctx, opts, "")
 	if err != nil {
 		if _, ok := err.(cerrors.ErrorResourceDoesNotExist); ok {
 			// The block path does not exist yet.  This is OK - it means
 			// there are no affine blocks.
-			return []cnet.IPNet{}, nil
+			return
 
 		} else {
 			log.Errorf("Error getting affine blocks: %v", err)
-			return nil, err
+			return
 		}
 	}
 
 	// Iterate through and extract the block CIDRs.
-	ids := []cnet.IPNet{}
 	for _, o := range datastoreObjs.KVPairs {
 		k := o.Key.(model.BlockAffinityKey)
 
 		// Add the block if no IP pools were specified, or if IP pools were specified
 		// and the block falls within the given IP pools.
 		if len(pools) == 0 {
-			ids = append(ids, k.CIDR)
+			blocksInPool = append(blocksInPool, k.CIDR)
 		} else {
+			found := false
 			for _, pool := range pools {
-				if pool.Contains(k.CIDR.IPNet.IP) {
-					ids = append(ids, k.CIDR)
+				var poolNet *cnet.IPNet
+				_, poolNet, err = cnet.ParseCIDR(pool.Spec.CIDR)
+				if err != nil {
+					log.Errorf("Error parsing CIDR: %s from pool: %s %v", pool.Spec.CIDR, pool.Name, err)
+					return
+				}
+
+				if poolNet.Contains(k.CIDR.IPNet.IP) {
+					blocksInPool = append(blocksInPool, k.CIDR)
+					found = true
 					break
 				}
 			}
+			if !found {
+				blocksNotInPool = append(blocksNotInPool, k.CIDR)
+			}
 		}
 	}
-	return ids, nil
+	return
 }
 
 // findUnclaimedBlock finds a block cidr which does not yet exist within the given list of pools. The provided pools
 // should already be sanitized and only enclude existing, enabled pools. Note that the block may become claimed
 // between receiving the cidr from this function and attempting to claim the corresponding block as this function
 // does not reserve the returned IPNet.
-func (rw blockReaderWriter) findUnclaimedBlock(ctx context.Context, host string, version ipVersion, pools []cnet.IPNet, config IPAMConfig) (*cnet.IPNet, error) {
+func (rw blockReaderWriter) findUnclaimedBlock(ctx context.Context, host string, version int, pools []v3.IPPool, config IPAMConfig) (*cnet.IPNet, error) {
 	// If there are no pools, we cannot assign addresses.
 	if len(pools) == 0 {
-		return nil, errors.New("no configured Calico pools")
+		return nil, fmt.Errorf("no configured Calico pools for node %s", host)
 	}
 
 	// Iterate through pools to find a new block.
@@ -106,22 +122,6 @@ func (rw blockReaderWriter) findUnclaimedBlock(ctx context.Context, host string,
 		}
 	}
 	return nil, noFreeBlocksError("No Free Blocks")
-}
-
-// isPoolInRequestedPools checks if the IP Pool that is passed in belongs to the list of IP Pools
-// that should be used for assigning IPs from.
-func isPoolInRequestedPools(pool cnet.IPNet, requestedPools []cnet.IPNet) bool {
-	if len(requestedPools) == 0 {
-		return true
-	}
-	// Compare the requested pools against the actual pool CIDR.  Note that we don't use deep equals
-	// because golang interchangeably seems to use 4-byte and 16-byte representations of IPv4 addresses.
-	for _, cidr := range requestedPools {
-		if pool.String() == cidr.String() {
-			return true
-		}
-	}
-	return false
 }
 
 // getPendingAffinity claims a pending affinity for the given host and subnet. The affinity can then
@@ -255,7 +255,7 @@ func (rw blockReaderWriter) confirmAffinity(ctx context.Context, aff *model.KVPa
 
 // releaseBlockAffinity releases the host's affinity to the given block, and returns an affinityClaimedError if
 // the host does not claim an affinity for the block.
-func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host string, blockCIDR cnet.IPNet) error {
+func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host string, blockCIDR cnet.IPNet, requireEmpty bool) error {
 	// Make sure hostname is not empty.
 	if host == "" {
 		log.Errorf("Hostname can't be empty")
@@ -290,6 +290,12 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 			logCtx.Warn("Failed to delete stale affinity")
 		}
 		return errBlockClaimConflict{Block: b}
+	}
+
+	// Don't release block affinity if we require it to be empty and it's not empty.
+	if requireEmpty && !b.empty() {
+		logCtx.Debug("Block must be empty but is not empty, refusing to remove affinity.")
+		return nil
 	}
 
 	// Mark the affinity as pending deletion.
@@ -341,32 +347,46 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 	return nil
 }
 
-// withinConfiguredPools returns true if the given IP is within a configured
-// Calico pool, and false otherwise.
-func (rw blockReaderWriter) withinConfiguredPools(ip cnet.IP) bool {
-	enabledPools, _ := rw.pools.GetEnabledPools(ip.Version())
+// getPoolForIP returns the pool if the given IP is within a configured
+// Calico pool, and nil otherwise.
+func (rw blockReaderWriter) getPoolForIP(ip cnet.IP, enabledPools []v3.IPPool) *v3.IPPool {
+	if enabledPools == nil {
+		enabledPools, _ = rw.pools.GetEnabledPools(ip.Version())
+	}
 	for _, p := range enabledPools {
 		// Compare any enabled pools.
-		if p.Contains(ip.IP) {
-			return true
+		_, pool, err := cnet.ParseCIDR(p.Spec.CIDR)
+		if err == nil && pool.Contains(ip.IP) {
+			return &p
 		}
 	}
-	return false
+	return nil
 }
 
 // Generator to get list of block CIDRs which
-// fall within the given pool. Returns nil when no more
-// blocks can be generated.
-func blockGenerator(pool cnet.IPNet) func() *cnet.IPNet {
-	// Determine the IP type to use.
-	version := getIPVersion(cnet.IP{pool.IP})
-	ip := cnet.IP{pool.IP}
+// fall within the given cidr. The passed in pool
+// must contain the passed in block cidr.
+// Returns nil when no more blocks can be generated.
+func blockGenerator(pool *v3.IPPool, cidr cnet.IPNet) func() *cnet.IPNet {
+	ip := cnet.IP{IP: cidr.IP}
+
+	var blockMask net.IPMask
+	if ip.Version() == 4 {
+		blockMask = net.CIDRMask(pool.Spec.BlockSize, 32)
+	} else {
+		blockMask = net.CIDRMask(pool.Spec.BlockSize, 128)
+	}
+
+	ones, size := blockMask.Size()
+	blockSize := new(big.Int).Exp(big.NewInt(2), big.NewInt(int64(size-ones)), nil)
+
 	return func() *cnet.IPNet {
 		returnIP := ip
-		if pool.Contains(ip.IP) {
-			ipnet := net.IPNet{returnIP.IP, version.BlockPrefixMask}
-			cidr := cnet.IPNet{ipnet}
-			ip = incrementIP(ip, big.NewInt(blockSize))
+
+		if cidr.Contains(ip.IP) {
+			ipnet := net.IPNet{IP: returnIP.IP, Mask: blockMask}
+			cidr := cnet.IPNet{IPNet: ipnet}
+			ip = incrementIP(ip, blockSize)
 			return &cidr
 		} else {
 			return nil
@@ -377,18 +397,32 @@ func blockGenerator(pool cnet.IPNet) func() *cnet.IPNet {
 // Returns a generator that, when called, returns a random
 // block from the given pool.  When there are no blocks left,
 // the it returns nil.
-func randomBlockGenerator(pool cnet.IPNet, hostName string) func() *cnet.IPNet {
+func randomBlockGenerator(ipPool v3.IPPool, hostName string) func() *cnet.IPNet {
+	_, pool, err := cnet.ParseCIDR(ipPool.Spec.CIDR)
+	if err != nil {
+		log.Errorf("Error parsing CIDR: %s %v", ipPool.Spec.CIDR, err)
+		return func() *cnet.IPNet { return nil }
+	}
 
 	// Determine the IP type to use.
-	version := getIPVersion(cnet.IP{pool.IP})
-	baseIP := cnet.IP{pool.IP}
+	baseIP := cnet.IP{IP: pool.IP}
+	version := getIPVersion(baseIP)
+	var blockMask net.IPMask
+	if version == 4 {
+		blockMask = net.CIDRMask(ipPool.Spec.BlockSize, 32)
+	} else {
+		blockMask = net.CIDRMask(ipPool.Spec.BlockSize, 128)
+	}
 
 	// Determine the number of blocks within this pool.
 	ones, size := pool.Mask.Size()
-	prefixLen := size - ones
-	numIP := new(big.Int).Exp(big.NewInt(2), big.NewInt(int64(prefixLen)), nil)
+	numIP := new(big.Int).Exp(big.NewInt(2), big.NewInt(int64(size-ones)), nil)
+
+	ones, size = blockMask.Size()
+	blockSize := new(big.Int).Exp(big.NewInt(2), big.NewInt(int64(size-ones)), nil)
+
 	numBlocks := new(big.Int)
-	numBlocks.Div(numIP, big.NewInt(blockSize))
+	numBlocks.Div(numIP, blockSize)
 
 	// Create a random number generator seed based on the hostname.
 	// This is to avoid assigning multiple blocks when multiple
@@ -414,8 +448,9 @@ func randomBlockGenerator(pool cnet.IPNet, hostName string) func() *cnet.IPNet {
 	return func() *cnet.IPNet {
 		// The `big.NewInt(0)` part creates a temp variable and assigns the result of multiplication of `i` and `big.NewInt(blockSize)`
 		// Note: we are not using `i.Mul()` because that will assign the result of the multiplication to `i`, which will cause unexpected issues
-		ip := incrementIP(baseIP, big.NewInt(0).Mul(i, big.NewInt(blockSize)))
-		ipnet := net.IPNet{ip.IP, version.BlockPrefixMask}
+		ip := incrementIP(baseIP, big.NewInt(0).Mul(i, blockSize))
+
+		ipnet := net.IPNet{ip.IP, blockMask}
 
 		numDiff.Sub(numBlocks, i)
 
@@ -439,4 +474,28 @@ func randomBlockGenerator(pool cnet.IPNet, hostName string) func() *cnet.IPNet {
 		// Return the block from this pool that corresponds with the index.
 		return &cnet.IPNet{ipnet}
 	}
+}
+
+// Find the block for a given IP (without needing a pool)
+func (rw blockReaderWriter) getBlockForIP(ctx context.Context, ip cnet.IP) (*cnet.IPNet, error) {
+	// Lookup all blocks by providing an empty BlockListOptions to the List operation.
+	opts := model.BlockListOptions{IPVersion: ip.Version()}
+	datastoreObjs, err := rw.client.List(ctx, opts, "")
+	if err != nil {
+		log.Errorf("Error getting affine blocks: %v", err)
+		return nil, err
+	}
+
+	// Iterate through and extract the block CIDRs.
+	for _, o := range datastoreObjs.KVPairs {
+		k := o.Key.(model.BlockKey)
+		if k.CIDR.IPNet.Contains(ip.IP) {
+			log.Debugf("Found IP %s in block %s", ip.String(), k.String())
+			return &k.CIDR, nil
+		}
+	}
+
+	// No blocks found.
+	log.Debugf("IP %s could not be found in any blocks", ip.String())
+	return nil, nil
 }

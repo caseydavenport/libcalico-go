@@ -57,6 +57,7 @@ type Interface interface {
 	ShouldMigrate() (bool, error)
 	CanMigrate() error
 	Migrate() (*MigrationData, error)
+	IsMigrationInProgress() (bool, error)
 	Abort() error
 	Complete() error
 }
@@ -80,10 +81,9 @@ func New(clientv3 clientv3.Interface, clientv1 clients.V1ClientInterface, status
 
 // migrationHelper implements the migrate.Interface.
 type migrationHelper struct {
-	clientv3                clientv3.Interface
-	clientv1                clients.V1ClientInterface
-	enforceEmptyDestination bool
-	statusWriter            StatusWriterInterface
+	clientv3     clientv3.Interface
+	clientv1     clients.V1ClientInterface
+	statusWriter StatusWriterInterface
 }
 
 // Error types encountered during validation and migration.
@@ -225,7 +225,7 @@ func (m *migrationHelper) Migrate() (*MigrationData, error) {
 	// and will prevent the orchestrator plugins from adding any new workloads or IP allocations
 	if !m.clientv1.IsKDD() {
 		m.status("Pausing Calico networking")
-		if err := m.setReadyV1(false); err != nil {
+		if err := m.clearReadyV1(); err != nil {
 			m.statusError("Unable to pause calico networking")
 			return nil, MigrationError{
 				Type: ErrorGeneric,
@@ -293,6 +293,29 @@ func (m *migrationHelper) abortAfterError(err error, errType ErrorType) error {
 	return MigrationError{Type: errType, Err: err, NeedsAbort: true}
 }
 
+// IsMigrationInProgress infers from ShouldMigrate and the Ready flag if the datastore
+// is being migrated and returns true if it is. If migration is needed and the Ready
+// flag is false then it is assumed migration is in progress. This could provide a
+// false positive if there was an error during migration and migration was aborted.
+// The other non-error cases will return false.
+func (m *migrationHelper) IsMigrationInProgress() (bool, error) {
+	migrateNeeded, err := m.ShouldMigrate()
+	if err != nil {
+		return false, fmt.Errorf("error checking migration progress status: %v", err)
+	} else if migrateNeeded {
+		// Migration is needed. If Ready is true then no upgrade has been started
+		// (not in progress). If Ready is false then upgrade has been started.
+
+		ready, err := m.isReady()
+		if err != nil {
+			return false, fmt.Errorf("error checking migration progress status: %v", err)
+		}
+		return !ready, nil
+	} else {
+		return false, nil
+	}
+}
+
 // Abort aborts the upgrade by re-enabling Calico networking in v1.
 // If an error is returned it will be of type MigrationError.
 func (m *migrationHelper) Abort() error {
@@ -301,7 +324,7 @@ func (m *migrationHelper) Abort() error {
 	if !m.clientv1.IsKDD() {
 		m.status("Re-enabling Calico networking for v1")
 		for i := 0; i < forceEnableReadyRetries; i++ {
-			err = m.setReadyV1(true)
+			err = m.setReadyV1()
 			if err == nil {
 				break
 			}
@@ -368,7 +391,7 @@ type ic interface {
 }
 
 func (m *migrationHelper) v3DatastoreIsClean() (bool, error) {
-	bc := m.clientv3.(backend).Backend()
+	bc := m.clientv3.(backendClientAccessor).Backend()
 	if i, ok := bc.(ic); ok {
 		return i.IsClean()
 	}
@@ -676,10 +699,17 @@ func (m *migrationHelper) queryAndConvertV1ToV3Nodes(data *MigrationData) error 
 // If neither the v1 nor v3 versions are present, then no migration is required.
 func (m *migrationHelper) ShouldMigrate() (bool, error) {
 	ci, err := m.clientv3.ClusterInformation().Get(context.Background(), "default", options.GetOptions{})
-	if err == nil {
+	if err == nil && ci.Spec.CalicoVersion == "" {
+		// The ClusterInformation exists but the CalicoVersion field is empty. This may happen if a
+		// non-calico/node or typha component initializes the datastore prior to the node writing in
+		// the current version, or the node or typha completing the data migration.
+		log.Debug("ClusterInformation contained empty CalicoVersion - treating as if ClusterInformation is not present")
+	} else if err == nil {
+		// The ClusterInformation exists and the CalicoVersion field is not empty, check if migration is
+		// required.
 		if yes, err := versionRequiresMigration(ci.Spec.CalicoVersion); err != nil {
 			log.Errorf("Unexpected CalicoVersion '%s' in ClusterInformation: %v", ci.Spec.CalicoVersion, err)
-			return true, fmt.Errorf("unexpected CalicoVersion '%s' in ClusterInformation: %v", ci.Spec.CalicoVersion, err)
+			return false, fmt.Errorf("unexpected CalicoVersion '%s' in ClusterInformation: %v", ci.Spec.CalicoVersion, err)
 		} else if yes {
 			log.Debugf("ClusterInformation contained CalicoVersion '%s' and indicates migration is needed", ci.Spec.CalicoVersion)
 			return true, nil
@@ -687,7 +717,7 @@ func (m *migrationHelper) ShouldMigrate() (bool, error) {
 		log.Debugf("ClusterInformation contained CalicoVersion '%s' and indicates migration is not needed", ci.Spec.CalicoVersion)
 		return false, nil
 	} else if _, ok := err.(cerrors.ErrorResourceDoesNotExist); !ok {
-		// The error indicates a problem with accessing the resource
+		// The error indicates a problem with accessing the resource.
 		return false, fmt.Errorf("unable to query ClusterInformation to determine Calico version: %v", err)
 	}
 
@@ -718,8 +748,8 @@ func (m *migrationHelper) ShouldMigrate() (bool, error) {
 		// v3.0+ version in the v1 API data which suggests a modified/hacked set up which we
 		// cannot migrate from.
 		log.Errorf("Unexpected version in the global Felix configuration, currently at %s", v)
-		return false, errors.New(fmt.Sprintf("unexpected Calico version '%s': migration to v3 should be from a tagged "+
-			"release of Calico v%s+", v, minUpgradeVersion))
+		return false, fmt.Errorf("unexpected Calico version '%s': migration to v3 should be from a tagged "+
+			"release of Calico v%s+", v, minUpgradeVersion)
 	}
 	log.Debugf("GlobalConfig contained CalicoVersion '%s' and indicates migration is needed", v)
 	return true, nil
@@ -857,29 +887,44 @@ func (m *migrationHelper) statusError(format string, a ...interface{}) {
 	}
 }
 
-// setReadyV1 sets the ready flag in the v1 datastore.
-func (m *migrationHelper) setReadyV1(ready bool) error {
-	log.WithField("Ready", ready).Info("Updating Ready flag in v1")
-	_, err := m.clientv1.Apply(&model.KVPair{
-		Key:   model.ReadyFlagKey{},
-		Value: ready,
-	})
+func (m *migrationHelper) clearReadyV1() error {
+	log.WithField("Ready", false).Info("Updating Ready flag in v1")
+	readyKV, err := m.clientv1.Get(model.ReadyFlagKey{})
 	if err != nil {
-		if ready {
-			m.statusBullet("failed to resume Calico networking in the v1 configuration")
-		} else {
-			m.statusBullet("failed to pause Calico networking in the v1 configuration")
-		}
+		m.statusBullet("failed to get status of Calico networking in the v1 configuration")
+		return err
 	}
-	if ready {
-		m.statusBullet("successfully resumed Calico networking in the v1 configuration")
-	} else {
-		m.statusBullet("successfully paused Calico networking in the v1 configuration")
+	if !readyKV.Value.(bool) {
+		m.statusBullet("Calico networking already paused in the v1 configuration")
+		return fmt.Errorf("Calico networking already paused do not continue.")
 	}
+	readyKV.Value = false
+	_, err = m.clientv1.Update(readyKV)
+
+	if err != nil {
+		m.statusBullet("failed to pause Calico networking in the v1 configuration")
+		return err
+	}
+	m.statusBullet("successfully paused Calico networking in the v1 configuration")
 	return nil
 }
 
-// setReadyV1 sets the ready flag in the v3 datastore.
+// setReadyV1 sets the ready flag in the v1 datastore.
+func (m *migrationHelper) setReadyV1() error {
+	log.WithField("Ready", true).Info("Updating Ready flag in v1")
+	_, err := m.clientv1.Apply(&model.KVPair{
+		Key:   model.ReadyFlagKey{},
+		Value: true,
+	})
+	if err != nil {
+		m.statusBullet("failed to resume Calico networking in the v1 configuration")
+		return err
+	}
+	m.statusBullet("successfully resumed Calico networking in the v1 configuration")
+	return nil
+}
+
+// setReadyV3 sets the ready flag in the v3 datastore.
 func (m *migrationHelper) setReadyV3(ready bool) error {
 	log.WithField("Ready", ready).Info("Updating Ready flag in v3")
 	c, err := m.clientv3.ClusterInformation().Get(context.Background(), "default", options.GetOptions{})
@@ -936,6 +981,23 @@ func (m *migrationHelper) setReadyV3(ready bool) error {
 	return nil
 }
 
+// isReady reads the Ready flag from the datastore and returns its value
+func (m *migrationHelper) isReady() (bool, error) {
+	kv, err := m.clientv1.Get(model.ReadyFlagKey{})
+	if err != nil {
+		m.statusError("Unable to query the v1 datastore for ready status")
+		m.statusBullet("Cause: %v", err)
+		return false, err
+	}
+
+	if kv.Value.(bool) {
+		m.statusBullet("Ready flag is true.")
+	} else {
+		m.statusBullet("Ready flag is false.")
+	}
+	return kv.Value.(bool), nil
+}
+
 // resourceToKey creates a model.Key from a v3 resource.
 func resourceToKey(r converters.Resource) model.Key {
 	return model.ResourceKey{
@@ -951,7 +1013,7 @@ func (m *migrationHelper) storeV3Resources(data *MigrationData) error {
 	for n, r := range data.Resources {
 		// Convert the resource to a KVPair and access the backend datastore directly.
 		// This is slightly more efficient, and cuts out some of the unneccessary additional
-		// processing. Since we applying directly to the backend we need to set the UUID
+		// processing. Since we are applying directly to the backend we need to set the UUID
 		// and creation timestamp which is normally handled by clientv3.
 		r = toStorage(r)
 		if err := m.applyToBackend(&model.KVPair{
@@ -1066,15 +1128,15 @@ func (m *migrationHelper) migrateIPAMData() error {
 	return nil
 }
 
-// backend is an interface used to access the backend client from the main clientv3.
-type backend interface {
+// backendClientAccessor is an interface used to access the backend client from the main clientv3.
+type backendClientAccessor interface {
 	Backend() bapi.Client
 }
 
 // applyToBackend applies the supplied KVPair directly to the backend datastore.
 func (m *migrationHelper) applyToBackend(kvp *model.KVPair) error {
-	// Extract the backend API from the v3 client.
-	bc := m.clientv3.(backend).Backend()
+	// Extract the backend client API from the v3 client.
+	bc := m.clientv3.(backendClientAccessor).Backend()
 
 	// First try creating the resource. If the resource already exists, try an update.
 	logCxt := log.WithField("Key", kvp.Key)

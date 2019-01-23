@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2018 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -152,8 +152,10 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 
 			hostA = "hostA"
 			hostB = "hostB"
+			applyNode(bc, hostA, nil)
+			applyNode(bc, hostB, nil)
 
-			pools = &ipPoolAccessor{pools: map[string]bool{"10.0.0.0/26": true}}
+			pools = &ipPoolAccessor{pools: map[string]pool{"10.0.0.0/26": {enabled: true}}}
 
 			ctx = context.Background()
 
@@ -164,7 +166,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 		It("should handle multiple racing block affinity claims from different hosts", func() {
 			By("setting up the client for the test", func() {
 				// Pool has room for 16 blocks.
-				pls := &ipPoolAccessor{pools: map[string]bool{"10.0.0.0/22": true}}
+				pls := &ipPoolAccessor{pools: map[string]pool{"10.0.0.0/22": {enabled: true}}}
 				rw = blockReaderWriter{client: bc, pools: pls}
 				ic = &ipamClient{
 					client:            bc,
@@ -184,7 +186,10 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 						defer GinkgoRecover()
 
 						testhost := fmt.Sprintf("host-%d", j)
-						ips, err := ic.autoAssign(ctx, 1, &testhost, nil, nil, ipv4, testhost)
+						applyNode(bc, testhost, nil)
+						defer deleteNode(bc, testhost)
+
+						ips, err := ic.autoAssign(ctx, 1, &testhost, nil, nil, 4, testhost, 0)
 						if err != nil {
 							log.WithError(err).Errorf("Auto assign failed for host %s", testhost)
 							testErr = err
@@ -251,7 +256,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 		It("should handle multiple racing block affinity claims from the same host", func() {
 			By("setting up the client for the test", func() {
 				// Pool has room for 16 blocks.
-				pls := &ipPoolAccessor{pools: map[string]bool{"10.0.0.0/25": true}}
+				pls := &ipPoolAccessor{pools: map[string]pool{"10.0.0.0/25": {enabled: true}}}
 				rw = blockReaderWriter{client: bc, pools: pls}
 				ic = &ipamClient{
 					client:            bc,
@@ -260,23 +265,23 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				}
 			})
 
-			By("assigning from host twice the number of available blocks all at once", func() {
+			By("assigning from the same host several times at once", func() {
 				wg := sync.WaitGroup{}
 				var testErr error
 
+				testhost := "single-host"
+				applyNode(bc, testhost, nil)
 				for i := 0; i < 4; i++ {
 					wg.Add(1)
 					go func() {
 						defer GinkgoRecover()
 
-						testhost := "single-host"
-						ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, ipv4, testhost)
+						ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, 4, testhost, 0)
 						if err != nil {
 							log.WithError(err).Errorf("Auto assign failed for host %s", testhost)
 							testErr = err
 						}
 						if len(ips) != 1 {
-							// All hosts should get an IP, although some will be from non-affine blocks.
 							log.WithError(err).Errorf("No IPs assigned for host %s", testhost)
 							testErr = fmt.Errorf("No IPs assigned to %s", testhost)
 						}
@@ -295,6 +300,10 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				Expect(err).NotTo(HaveOccurred())
 
 				// Should only have a single affinity, for the test host.
+				// Note: There is a known race condition where this may not always be true, resulting
+				// in test flakes on this line. The race occurs when multiple calls on the same host attempt to pick a new block
+				// CIDR and one of them succeeds in claiming the block before the other finishes selecting a CIDR. As a
+				// result, two affine blocks are successfully claimed for the host.
 				Expect(len(affs.KVPairs)).To(Equal(1))
 
 				// For each affinity, expect the corresponding block to have the same affinity.
@@ -313,7 +322,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 		It("should handle multiple racing claims for the same affinity", func() {
 			By("setting up the client for the test", func() {
 				// Pool has room for 16 blocks.
-				pls := &ipPoolAccessor{pools: map[string]bool{"10.0.0.0/22": true}}
+				pls := &ipPoolAccessor{pools: map[string]pool{"10.0.0.0/22": {enabled: true}}}
 				rw = blockReaderWriter{client: bc, pools: pls}
 				ic = &ipamClient{
 					client:            bc,
@@ -543,7 +552,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			})
 
 			By("attempting to release the block", func() {
-				err := rw.releaseBlockAffinity(ctx, hostA, *net)
+				err := rw.releaseBlockAffinity(ctx, hostA, *net, false)
 				Expect(err).NotTo(BeNil())
 
 				// Should hit a resource update conflict.
@@ -659,7 +668,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			}
 
 			By("attempting to claim the block on multiple hosts at the same time", func() {
-				ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, ipv4, hostA)
+				ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, 4, hostA, 0)
 
 				// Shouldn't return an error.
 				Expect(err).NotTo(HaveOccurred())
@@ -689,7 +698,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			})
 
 			By("attempting to claim another address", func() {
-				ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, ipv4, hostA)
+				ips, err := ic.autoAssign(ctx, 1, nil, nil, nil, 4, hostA, 0)
 
 				// Shouldn't return an error.
 				Expect(err).NotTo(HaveOccurred())
@@ -737,7 +746,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				client: bc,
 				pools:  p,
 			}
-			p = &ipPoolAccessor{pools: map[string]bool{}}
+			p = &ipPoolAccessor{pools: map[string]pool{}}
 			ctx = context.Background()
 
 			_, net, err = cnet.ParseCIDR("10.1.0.0/26")
@@ -779,7 +788,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			})
 
 			By("releasing the affinity", func() {
-				err := rw.releaseBlockAffinity(ctx, host, *net)
+				err := rw.releaseBlockAffinity(ctx, host, *net, false)
 				Expect(err).NotTo(HaveOccurred())
 			})
 
@@ -796,7 +805,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			})
 
 			By("releasing the affinity again", func() {
-				err := rw.releaseBlockAffinity(ctx, host, *net)
+				err := rw.releaseBlockAffinity(ctx, host, *net, false)
 				Expect(err).To(HaveOccurred())
 				_, ok := err.(cerrors.ErrorResourceDoesNotExist)
 				Expect(ok).To(BeTrue())

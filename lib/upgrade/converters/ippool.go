@@ -73,10 +73,18 @@ func (_ IPPool) BackendV1ToAPIV3(kvp *model.KVPair) (Resource, error) {
 	ipp := apiv3.NewIPPool()
 	ipp.Name = cidrToName(pool.CIDR)
 	ipp.Spec = apiv3.IPPoolSpec{
-		CIDR:        pool.CIDR.String(),
-		IPIPMode:    convertIPIPMode(pool.IPIPMode, pool.IPIPInterface),
-		NATOutgoing: pool.Masquerade,
-		Disabled:    pool.Disabled,
+		CIDR:         pool.CIDR.String(),
+		IPIPMode:     convertIPIPMode(pool.IPIPMode, pool.IPIPInterface),
+		NATOutgoing:  pool.Masquerade,
+		Disabled:     pool.Disabled,
+		NodeSelector: "all()",
+	}
+
+	// Set the blocksize based on IP address family.
+	if pool.CIDR.IP.To4() != nil {
+		ipp.Spec.BlockSize = 26
+	} else {
+		ipp.Spec.BlockSize = 122
 	}
 
 	return ipp, nil

@@ -1,4 +1,4 @@
-// Copyright (c) 2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2017-2018 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"context"
@@ -44,14 +45,12 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 	name1 := "networkp-1"
 	name2 := "networkp-2"
 	spec1 := apiv3.NetworkPolicySpec{
-
 		Order:    &order1,
 		Ingress:  []apiv3.Rule{testutils.InRule1, testutils.InRule2},
 		Egress:   []apiv3.Rule{testutils.EgressRule1, testutils.EgressRule2},
 		Selector: "thing == 'value'",
 	}
 	spec2 := apiv3.NetworkPolicySpec{
-
 		Order:    &order2,
 		Ingress:  []apiv3.Rule{testutils.InRule2, testutils.InRule1},
 		Egress:   []apiv3.Rule{testutils.EgressRule2, testutils.EgressRule1},
@@ -91,7 +90,7 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace1 + "/default." + name1 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace1 + "/default." + name1 + ") with error:"))
 
 			By("Attempting to creating a new NetworkPolicy with name1/spec1 and a non-empty ResourceVersion")
 			_, outError = c.NetworkPolicies().Create(ctx, &apiv3.NetworkPolicy{
@@ -108,7 +107,7 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			}, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
 			spec1.Types = types1
-			testutils.ExpectResource(res1, apiv3.KindNetworkPolicy, namespace1, name1, spec1)
+			Expect(res1).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec1))
 
 			// Track the version of the original data for name1.
 			rv1_1 := res1.ResourceVersion
@@ -124,19 +123,20 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			By("Getting NetworkPolicy (name1) and comparing the output against spec1")
 			res, outError := c.NetworkPolicies().Get(ctx, namespace1, name1, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res, apiv3.KindNetworkPolicy, namespace1, name1, spec1)
+			Expect(res).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec1))
 			Expect(res.ResourceVersion).To(Equal(res1.ResourceVersion))
 
 			By("Getting NetworkPolicy (name2) before it is created")
 			_, outError = c.NetworkPolicies().Get(ctx, namespace2, name2, options.GetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ") with error:"))
 
 			By("Listing all the NetworkPolicies in namespace1, expecting a single result with name1/spec1")
 			outList, outError := c.NetworkPolicies().List(ctx, options.ListOptions{Namespace: namespace1})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(1))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindNetworkPolicy, namespace1, name1, spec1)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace1, name1, spec1),
+			))
 
 			By("Creating a new NetworkPolicy with name2/spec2")
 			res2, outError := c.NetworkPolicies().Create(ctx, &apiv3.NetworkPolicy{
@@ -145,32 +145,34 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			}, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
 			spec2.Types = types2
-			testutils.ExpectResource(res2, apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+			Expect(res2).To(MatchResource(apiv3.KindNetworkPolicy, namespace2, name2, spec2))
 
 			By("Getting NetworkPolicy (name2) and comparing the output against spec2")
 			res, outError = c.NetworkPolicies().Get(ctx, namespace2, name2, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res, apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+			Expect(res).To(MatchResource(apiv3.KindNetworkPolicy, namespace2, name2, spec2))
 			Expect(res.ResourceVersion).To(Equal(res2.ResourceVersion))
 
 			By("Listing all the NetworkPolicies using an empty namespace (all-namespaces), expecting a two results with name1/spec1 and name2/spec2")
 			outList, outError = c.NetworkPolicies().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(2))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindNetworkPolicy, namespace1, name1, spec1)
-			testutils.ExpectResource(&outList.Items[1], apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace1, name1, spec1),
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace2, name2, spec2),
+			))
 
 			By("Listing all the NetworkPolicies in namespace2, expecting a one results with name2/spec2")
 			outList, outError = c.NetworkPolicies().List(ctx, options.ListOptions{Namespace: namespace2})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(1))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace2, name2, spec2),
+			))
 
 			By("Updating NetworkPolicy name1 with spec2")
 			res1.Spec = spec2
 			res1, outError = c.NetworkPolicies().Update(ctx, res1, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res1, apiv3.KindNetworkPolicy, namespace1, name1, spec2)
+			Expect(res1).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec2))
 
 			By("Attempting to update the NetworkPolicy without a Creation Timestamp")
 			res, outError = c.NetworkPolicies().Update(ctx, &apiv3.NetworkPolicy{
@@ -211,30 +213,32 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 				By("Getting NetworkPolicy (name1) with the original resource version and comparing the output against spec1")
 				res, outError = c.NetworkPolicies().Get(ctx, namespace1, name1, options.GetOptions{ResourceVersion: rv1_1})
 				Expect(outError).NotTo(HaveOccurred())
-				testutils.ExpectResource(res, apiv3.KindNetworkPolicy, namespace1, name1, spec1)
+				Expect(res).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec1))
 				Expect(res.ResourceVersion).To(Equal(rv1_1))
 			}
 
 			By("Getting NetworkPolicy (name1) with the updated resource version and comparing the output against spec2")
 			res, outError = c.NetworkPolicies().Get(ctx, namespace1, name1, options.GetOptions{ResourceVersion: rv1_2})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res, apiv3.KindNetworkPolicy, namespace1, name1, spec2)
+			Expect(res).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec2))
 			Expect(res.ResourceVersion).To(Equal(rv1_2))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Listing NetworkPolicies with the original resource version and checking for a single result with name1/spec1")
 				outList, outError = c.NetworkPolicies().List(ctx, options.ListOptions{Namespace: namespace1, ResourceVersion: rv1_1})
 				Expect(outError).NotTo(HaveOccurred())
-				Expect(outList.Items).To(HaveLen(1))
-				testutils.ExpectResource(&outList.Items[0], apiv3.KindNetworkPolicy, namespace1, name1, spec1)
+				Expect(outList.Items).To(ConsistOf(
+					testutils.Resource(apiv3.KindNetworkPolicy, namespace1, name1, spec1),
+				))
 			}
 
 			By("Listing NetworkPolicies (all namespaces) with the latest resource version and checking for two results with name1/spec2 and name2/spec2")
 			outList, outError = c.NetworkPolicies().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(2))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindNetworkPolicy, namespace1, name1, spec2)
-			testutils.ExpectResource(&outList.Items[1], apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace1, name1, spec2),
+				testutils.Resource(apiv3.KindNetworkPolicy, namespace2, name2, spec2),
+			))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Deleting NetworkPolicy (name1) with the old resource version")
@@ -246,7 +250,7 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			By("Deleting NetworkPolicy (name1) with the new resource version")
 			dres, outError := c.NetworkPolicies().Delete(ctx, namespace1, name1, options.DeleteOptions{ResourceVersion: rv1_2})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(dres, apiv3.KindNetworkPolicy, namespace1, name1, spec2)
+			Expect(dres).To(MatchResource(apiv3.KindNetworkPolicy, namespace1, name1, spec2))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Updating NetworkPolicy name2 with a 2s TTL and waiting for the entry to be deleted")
@@ -258,7 +262,7 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 				time.Sleep(2 * time.Second)
 				_, outError = c.NetworkPolicies().Get(ctx, namespace2, name2, options.GetOptions{})
 				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ")"))
+				Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ") with error:"))
 
 				By("Creating NetworkPolicy name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.NetworkPolicies().Create(ctx, &apiv3.NetworkPolicy{
@@ -272,20 +276,20 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 				time.Sleep(2 * time.Second)
 				_, outError = c.NetworkPolicies().Get(ctx, namespace2, name2, options.GetOptions{})
 				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ")"))
+				Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ") with error:"))
 			}
 
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
 				By("Attempting to deleting NetworkPolicy (name2) again")
 				dres, outError = c.NetworkPolicies().Delete(ctx, namespace2, name2, options.DeleteOptions{})
 				Expect(outError).NotTo(HaveOccurred())
-				testutils.ExpectResource(dres, apiv3.KindNetworkPolicy, namespace2, name2, spec2)
+				Expect(dres).To(MatchResource(apiv3.KindNetworkPolicy, namespace2, name2, spec2))
 			}
 
 			By("Attempting to delete NetworkPolicy (name2) again")
 			_, outError = c.NetworkPolicies().Delete(ctx, namespace2, name2, options.DeleteOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ") with error:"))
 
 			By("Listing all NetworkPolicies and expecting no items")
 			outList, outError = c.NetworkPolicies().List(ctx, options.ListOptions{})
@@ -295,7 +299,7 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			By("Getting NetworkPolicy (name2) and expecting an error")
 			_, outError = c.NetworkPolicies().Get(ctx, namespace2, name2, options.GetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: NetworkPolicy(" + namespace2 + "/default." + name2 + ") with error:"))
 		},
 
 		// Pass two fully populated PolicySpecs and expect the series of operations to succeed.
@@ -468,4 +472,103 @@ var _ = testutils.E2eDatastoreDescribe("NetworkPolicy tests", testutils.Datastor
 			testWatcher4.Stop()
 		})
 	})
+
+	// These tests check that the names we use on the API properly round-trip.  In particular,
+	// k8s and OpenStack policies have special prefixes, which should be preserved.  Other
+	// names get stored with a prefix, for consistency but the API returns them without the
+	// prefix.
+	nameNormalizationTests := []TableEntry{
+		// OpenStack names should round-trip, including their prefix.
+		Entry("OpenStack policy", "ossg.default.group1", "ossg.default.group1"),
+		// As should normal names.
+		Entry("OpenStack policy", "foo-bar", "default.foo-bar"),
+	}
+	if config.Spec.DatastoreType != "kubernetes" {
+		// Only test writing a knp-prefixed policy if we're not backed by KDD.  In KDD,
+		// the knp-prefixed policies are derived from k8s data so it doesn't make sense
+		// to write them through our API.
+		knpName := "knp.default.a-name"
+		nameNormalizationTests = append(nameNormalizationTests,
+			Entry("KDD policy", knpName, knpName),
+		)
+	}
+	DescribeTable("name round-tripping tests",
+		func(name, backendName string) {
+			c, err := clientv3.New(config)
+			Expect(err).NotTo(HaveOccurred())
+
+			be, err := backend.NewClient(config)
+			Expect(err).NotTo(HaveOccurred())
+			be.Clean()
+
+			By("Attempting to creating a new NetworkPolicy with name: " + name)
+			inNp := &apiv3.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace1, Name: name},
+				Spec:       ingressTypesSpec1,
+			}
+			np, outError := c.NetworkPolicies().Create(ctx, inNp, options.SetOptions{})
+			Expect(outError).NotTo(HaveOccurred())
+			Expect(inNp.GetName()).To(Equal(name), "Create() shouldn't touch input data")
+			Expect(np.GetName()).To(Equal(name), "Create() should return the data as we'd read it")
+
+			By("Reading back the raw data with its normalized name: " + backendName)
+			// Make sure that, where the name and the storage name differ, we do the write with
+			// the storage name.  Then the assertions below verify that all the CRUD methods
+			// do the right conversion too.
+			kv, err := be.Get(ctx, model.ResourceKey{
+				Kind:      apiv3.KindNetworkPolicy,
+				Namespace: namespace1,
+				Name:      backendName,
+			}, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(kv.Value.(*apiv3.NetworkPolicy).Spec).To(Equal(ingressTypesSpec1))
+
+			By("Getting the right policy by name")
+			np, err = c.NetworkPolicies().Get(ctx, namespace1, name, options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(np.GetName()).To(Equal(name))
+			Expect(np.Spec).To(Equal(ingressTypesSpec1))
+
+			By("Updating the policy")
+			np.Spec = egressTypesSpec2
+			np, err = c.NetworkPolicies().Update(ctx, np, options.SetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Getting the right policy")
+			np, err = c.NetworkPolicies().Get(ctx, namespace1, name, options.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(np.GetName()).To(Equal(name))
+			Expect(np.Spec).To(Equal(egressTypesSpec2))
+
+			By("Listing the policy with correct name (no query options)")
+			nps, err := c.NetworkPolicies().List(ctx, options.ListOptions{Namespace: namespace1})
+			Expect(err).NotTo(HaveOccurred())
+			var names []string
+			for _, np := range nps.Items {
+				names = append(names, np.GetName())
+			}
+			Expect(names).To(ContainElement(name))
+			if name != name {
+				Expect(names).NotTo(ContainElement(name))
+			}
+
+			By("Listing the policy with correct name (list by name)")
+			nps, err = c.NetworkPolicies().List(ctx,
+				options.ListOptions{Namespace: namespace1, Name: name})
+			Expect(err).NotTo(HaveOccurred())
+			names = nil
+			for _, np := range nps.Items {
+				names = append(names, np.GetName())
+			}
+			Expect(names).To(ConsistOf(name))
+
+			By("Deleting the policy via the name")
+			np, err = c.NetworkPolicies().Delete(ctx, namespace1, name, options.DeleteOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			if np != nil {
+				Expect(np.GetName()).To(Equal(name))
+			}
+		},
+		nameNormalizationTests...,
+	)
 })

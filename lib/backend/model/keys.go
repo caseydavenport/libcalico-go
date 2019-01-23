@@ -15,14 +15,15 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
-	"reflect"
-	"strings"
-
 	"fmt"
 	net2 "net"
+	"reflect"
+	"strings"
 	"time"
 
+	"github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/net"
 	log "github.com/sirupsen/logrus"
 )
@@ -237,9 +238,10 @@ func KeyFromDefaultPath(path string) Key {
 		cidr := strings.Replace(mungedCIDR, "-", "/", 1)
 		_, c, err := net.ParseCIDR(cidr)
 		if err != nil {
-			panic(err)
+			log.WithError(err).Warningf("Failed to parse CIDR %s", cidr)
+		} else {
+			return IPPoolKey{CIDR: *c}
 		}
-		return IPPoolKey{CIDR: *c}
 	} else if m := matchGlobalConfig.FindStringSubmatch(path); m != nil {
 		log.Debugf("Path is a global felix config: %v", path)
 		return GlobalConfigKey{Name: m[1]}
@@ -249,6 +251,24 @@ func KeyFromDefaultPath(path string) Key {
 	} else if matchReadyFlag.MatchString(path) {
 		log.Debugf("Path is a ready flag: %v", path)
 		return ReadyFlagKey{}
+	} else if k := (NodeBGPConfigListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (GlobalBGPConfigListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (BlockAffinityListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (ResourceListOptions{Kind: v3.KindNode}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (ResourceListOptions{Kind: v3.KindBGPPeer}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (HostEndpointStatusListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (WorkloadEndpointStatusListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (ActiveStatusReportListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
+	} else if k := (LastStatusReportListOptions{}).KeyFromDefaultPath(path); k != nil {
+		return k
 	} else {
 		log.Debugf("Path is unknown: %v", path)
 	}
@@ -288,10 +308,25 @@ func ParseValue(key Key, rawData []byte) (interface{}, error) {
 	iface := value.Interface()
 	err = json.Unmarshal(rawData, iface)
 	if err != nil {
-		log.Warningf("Failed to unmarshal %#v into value %#v",
-			string(rawData), value)
-		return nil, err
+		// This is a special case to address backwards compatibility from the time when we had no state information as block affinity value.
+		// example:
+		// Key: "/calico/ipam/v2/host/myhost.io/ipv4/block/172.29.82.0-26"
+		// Value: ""
+		// In 3.0.7 we added block affinity state as the value, so old "" value is no longer a valid JSON, so for that
+		// particular case we replace the "" with a "{}" so it can be parsed and we don't leak blocks after upgrade to Calico 3.0.7
+		// See: https://github.com/projectcalico/calico/issues/1956
+		if bytes.Equal(rawData, []byte(``)) && valueType == typeBlockAff {
+			rawData = []byte(`{}`)
+			if err = json.Unmarshal(rawData, iface); err != nil {
+				return nil, err
+			}
+		} else {
+			log.Warningf("Failed to unmarshal %#v into value %#v",
+				string(rawData), value)
+			return nil, err
+		}
 	}
+
 	if elem.Kind() != reflect.Struct {
 		// Pointer to a map or slice, unwrap.
 		iface = elem.Interface()

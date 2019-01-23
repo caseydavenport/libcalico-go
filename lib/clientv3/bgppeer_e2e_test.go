@@ -39,6 +39,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 	ctx := context.Background()
 	name1 := "bgppeer-1"
 	name2 := "bgppeer-2"
+	name3 := "bgppeer-3"
 	spec1 := apiv3.BGPPeerSpec{
 		Node:     "node1",
 		PeerIP:   "10.0.0.1",
@@ -48,6 +49,10 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 		Node:     "node2",
 		PeerIP:   "20.0.0.1",
 		ASNumber: numorstring.ASNumber(6511),
+	}
+	spec3 := apiv3.BGPPeerSpec{
+		NodeSelector: "has(routeReflectorClusterID)",
+		PeerSelector: "has(routeReflectorClusterID)",
 	}
 
 	DescribeTable("BGPPeer e2e CRUD tests",
@@ -65,7 +70,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name1 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name1 + ") with error:"))
 
 			By("Attempting to creating a new BGPPeer with name1/spec1 and a non-empty ResourceVersion")
 			_, outError = c.BGPPeers().Create(ctx, &apiv3.BGPPeer{
@@ -81,7 +86,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res1, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
+			Expect(res1).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1))
 
 			// Track the version of the original data for name1.
 			rv1_1 := res1.ResourceVersion
@@ -97,19 +102,20 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 			By("Getting BGPPeer (name1) and comparing the output against spec1")
 			res, outError := c.BGPPeers().Get(ctx, name1, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
+			Expect(res).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1))
 			Expect(res.ResourceVersion).To(Equal(res1.ResourceVersion))
 
 			By("Getting BGPPeer (name2) before it is created")
 			_, outError = c.BGPPeers().Get(ctx, name2, options.GetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name2 + ") with error:"))
 
 			By("Listing all the BGPPeers, expecting a single result with name1/spec1")
 			outList, outError := c.BGPPeers().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(1))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1),
+			))
 
 			By("Creating a new BGPPeer with name2/spec2")
 			res2, outError := c.BGPPeers().Create(ctx, &apiv3.BGPPeer{
@@ -117,26 +123,27 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				Spec:       spec2,
 			}, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res2, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2)
+			Expect(res2).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2))
 
 			By("Getting BGPPeer (name2) and comparing the output against spec2")
 			res, outError = c.BGPPeers().Get(ctx, name2, options.GetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res2, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2)
+			Expect(res2).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2))
 			Expect(res.ResourceVersion).To(Equal(res2.ResourceVersion))
 
-			By("Listing all the BGPPeers, expecting a two results with name1/spec1 and name2/spec2")
+			By("Listing all the BGPPeers, expecting two results with name1/spec1 and name2/spec2")
 			outList, outError = c.BGPPeers().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(2))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
-			testutils.ExpectResource(&outList.Items[1], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1),
+				testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2),
+			))
 
 			By("Updating BGPPeer name1 with spec2")
 			res1.Spec = spec2
 			res1, outError = c.BGPPeers().Update(ctx, res1, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res1, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2)
+			Expect(res1).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2))
 
 			By("Attempting to update the BGPPeer without a Creation Timestamp")
 			res, outError = c.BGPPeers().Update(ctx, &apiv3.BGPPeer{
@@ -177,30 +184,32 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				By("Getting BGPPeer (name1) with the original resource version and comparing the output against spec1")
 				res, outError = c.BGPPeers().Get(ctx, name1, options.GetOptions{ResourceVersion: rv1_1})
 				Expect(outError).NotTo(HaveOccurred())
-				testutils.ExpectResource(res, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
+				Expect(res).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1))
 				Expect(res.ResourceVersion).To(Equal(rv1_1))
 			}
 
 			By("Getting BGPPeer (name1) with the updated resource version and comparing the output against spec2")
 			res, outError = c.BGPPeers().Get(ctx, name1, options.GetOptions{ResourceVersion: rv1_2})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2)
+			Expect(res).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2))
 			Expect(res.ResourceVersion).To(Equal(rv1_2))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Listing BGPPeers with the original resource version and checking for a single result with name1/spec1")
 				outList, outError = c.BGPPeers().List(ctx, options.ListOptions{ResourceVersion: rv1_1})
 				Expect(outError).NotTo(HaveOccurred())
-				Expect(outList.Items).To(HaveLen(1))
-				testutils.ExpectResource(&outList.Items[0], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1)
+				Expect(outList.Items).To(ConsistOf(
+					testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec1),
+				))
 			}
 
 			By("Listing BGPPeers with the latest resource version and checking for two results with name1/spec2 and name2/spec2")
 			outList, outError = c.BGPPeers().List(ctx, options.ListOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			Expect(outList.Items).To(HaveLen(2))
-			testutils.ExpectResource(&outList.Items[0], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2)
-			testutils.ExpectResource(&outList.Items[1], apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2)
+			Expect(outList.Items).To(ConsistOf(
+				testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2),
+				testutils.Resource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2),
+			))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Deleting BGPPeer (name1) with the old resource version")
@@ -212,7 +221,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 			By("Deleting BGPPeer (name1) with the new resource version")
 			dres, outError := c.BGPPeers().Delete(ctx, name1, options.DeleteOptions{ResourceVersion: rv1_2})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(dres, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2)
+			Expect(dres).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name1, spec2))
 
 			if config.Spec.DatastoreType != apiconfig.Kubernetes {
 				By("Updating BGPPeer name2 with a 2s TTL and waiting for the entry to be deleted")
@@ -224,7 +233,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				time.Sleep(2 * time.Second)
 				_, outError = c.BGPPeers().Get(ctx, name2, options.GetOptions{})
 				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name2 + ")"))
+				Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name2 + ") with error:"))
 
 				By("Creating BGPPeer name2 with a 2s TTL and waiting for the entry to be deleted")
 				_, outError = c.BGPPeers().Create(ctx, &apiv3.BGPPeer{
@@ -238,20 +247,20 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 				time.Sleep(2 * time.Second)
 				_, outError = c.BGPPeers().Get(ctx, name2, options.GetOptions{})
 				Expect(outError).To(HaveOccurred())
-				Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name2 + ")"))
+				Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name2 + ") with error:"))
 			}
 
 			if config.Spec.DatastoreType == apiconfig.Kubernetes {
 				By("Attempting to deleting BGPPeer (name2)")
 				dres, outError = c.BGPPeers().Delete(ctx, name2, options.DeleteOptions{})
 				Expect(outError).NotTo(HaveOccurred())
-				testutils.ExpectResource(dres, apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2)
+				Expect(dres).To(MatchResource(apiv3.KindBGPPeer, testutils.ExpectNoNamespace, name2, spec2))
 			}
 
 			By("Attempting to deleting BGPPeer (name2) again")
 			_, outError = c.BGPPeers().Delete(ctx, name2, options.DeleteOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name2 + ") with error:"))
 
 			By("Listing all BGPPeers and expecting no items")
 			outList, outError = c.BGPPeers().List(ctx, options.ListOptions{})
@@ -261,11 +270,12 @@ var _ = testutils.E2eDatastoreDescribe("BGPPeer tests", testutils.DatastoreAll, 
 			By("Getting BGPPeer (name2) and expecting an error")
 			_, outError = c.BGPPeers().Get(ctx, name2, options.GetOptions{})
 			Expect(outError).To(HaveOccurred())
-			Expect(outError.Error()).To(Equal("resource does not exist: BGPPeer(" + name2 + ")"))
+			Expect(outError.Error()).To(ContainSubstring("resource does not exist: BGPPeer(" + name2 + ") with error:"))
 		},
 
-		// Test 1: Pass two fully populated BGPPeerSpecs and expect the series of operations to succeed.
-		Entry("Two fully populated BGPPeerSpecs", name1, name2, spec1, spec2),
+		Entry("BGPPeerSpecs 1,2", name1, name2, spec1, spec2),
+		Entry("BGPPeerSpecs 2,3", name2, name3, spec2, spec3),
+		Entry("BGPPeerSpecs 3,1", name3, name1, spec3, spec1),
 	)
 
 	Describe("BGPPeer watch functionality", func() {

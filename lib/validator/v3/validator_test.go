@@ -58,6 +58,8 @@ func init() {
 	protoUDP := numorstring.ProtocolFromString("UDP")
 	protoNumeric := numorstring.ProtocolFromInt(123)
 
+	as61234, _ := numorstring.ASNumberFromString("61234")
+
 	// longLabelsValue is 63 and 64 chars long
 	maxAnnotationsLength := 256 * (1 << 10)
 	longValue := make([]byte, maxAnnotationsLength)
@@ -244,6 +246,13 @@ func init() {
 					},
 				},
 				Node: "node01",
+			},
+			true,
+		),
+		Entry("should accept HostEndpointSpec with interfaceName *",
+			api.HostEndpointSpec{
+				InterfaceName: "*",
+				Node:          "node01",
 			},
 			true,
 		),
@@ -452,13 +461,28 @@ func init() {
 				Spec: api.IPPoolSpec{CIDR: netv4_3},
 			}, false,
 		),
+		Entry("should allow a valid nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{
+					Name: "pool.name",
+				},
+				Spec: api.IPPoolSpec{CIDR: netv4_3, NodeSelector: `foo == "bar"`},
+			}, true,
+		),
+		Entry("should disallow a invalid nodeSelector",
+			api.IPPool{
+				ObjectMeta: v1.ObjectMeta{
+					Name: "pool.name",
+				},
+				Spec: api.IPPoolSpec{CIDR: netv4_3, NodeSelector: "this is not valid selector syntax"},
+			}, false,
+		),
 
 		// (API) Interface.
-		Entry("should accept a valid interface", api.WorkloadEndpointSpec{InterfaceName: "ValidIntface0-9"}, true),
+		Entry("should accept a valid interface", api.WorkloadEndpointSpec{InterfaceName: "Valid_Iface.0-9"}, true),
 		Entry("should reject an interface that is too long", api.WorkloadEndpointSpec{InterfaceName: "interfaceTooLong"}, false),
 		Entry("should reject & in an interface", api.WorkloadEndpointSpec{InterfaceName: "Invalid&Intface"}, false),
 		Entry("should reject # in an interface", api.WorkloadEndpointSpec{InterfaceName: "Invalid#Intface"}, false),
-		Entry("should reject . in an interface", api.WorkloadEndpointSpec{InterfaceName: "Invalid.Intface"}, false),
 		Entry("should reject : in an interface", api.WorkloadEndpointSpec{InterfaceName: "Invalid:Intface"}, false),
 
 		// (API) FelixConfiguration.
@@ -482,6 +506,15 @@ func init() {
 		Entry("should reject a named port KubeNodePortRanges value", api.FelixConfigurationSpec{KubeNodePortRanges: &[]numorstring.Port{
 			numorstring.NamedPort("testport"),
 		}}, false),
+		Entry("should accept a valid list of ExternalNodesCIDRList", api.FelixConfigurationSpec{ExternalNodesCIDRList: &[]string{"1.1.1.1", "1.1.1.2/32", "1.1.3.0/23"}},
+			true),
+		Entry("should reject an invalid list of ExternalNodesCIDRList", api.FelixConfigurationSpec{ExternalNodesCIDRList: &[]string{"foobar", "1.1.1.1"}}, false),
+		Entry("should reject IPv6 list of ExternalNodesCIDRList", api.FelixConfigurationSpec{ExternalNodesCIDRList: &[]string{"abcd::1", "abef::2/128"}}, false),
+
+		Entry("should accept aan empty OpenStackRegion", api.FelixConfigurationSpec{OpenstackRegion: ""}, true),
+		Entry("should accept a valid OpenStackRegion", api.FelixConfigurationSpec{OpenstackRegion: "foo"}, true),
+		Entry("should reject an invalid OpenStackRegion", api.FelixConfigurationSpec{OpenstackRegion: "FOO"}, false),
+		Entry("should reject an overlong OpenStackRegion", api.FelixConfigurationSpec{OpenstackRegion: "my-region-has-a-very-long-and-extremely-interesting-name"}, false),
 
 		Entry("should reject an invalid LogSeverityScreen value 'badVal'", api.FelixConfigurationSpec{LogSeverityScreen: "badVal"}, false),
 		Entry("should reject an invalid LogSeverityFile value 'badVal'", api.FelixConfigurationSpec{LogSeverityFile: "badVal"}, false),
@@ -1113,11 +1146,37 @@ func init() {
 				Protocol:  protocolFromString("ICMP"),
 				IPVersion: &V6,
 			}, false),
+		Entry("should accept Allow rule with HTTP clause",
+			api.Rule{
+				Action: "Allow",
+				HTTP:   &api.HTTPMatch{Methods: []string{"GET"}},
+			}, true),
+		Entry("should reject Deny rule with HTTP clause",
+			api.Rule{
+				Action: "Deny",
+				HTTP:   &api.HTTPMatch{Methods: []string{"GET"}},
+			}, false),
 
 		// (API) BGPPeerSpec
 		Entry("should accept valid BGPPeerSpec", api.BGPPeerSpec{PeerIP: ipv4_1}, true),
 		Entry("should reject invalid BGPPeerSpec (IPv4)", api.BGPPeerSpec{PeerIP: bad_ipv4_1}, false),
 		Entry("should reject invalid BGPPeerSpec (IPv6)", api.BGPPeerSpec{PeerIP: bad_ipv6_1}, false),
+		Entry("should reject BGPPeerSpec with both Node and NodeSelector", api.BGPPeerSpec{
+			Node:         "my-node",
+			NodeSelector: "has(mylabel)",
+		}, false),
+		Entry("should reject BGPPeerSpec with both PeerIP and PeerSelector", api.BGPPeerSpec{
+			PeerIP:       ipv4_1,
+			PeerSelector: "has(mylabel)",
+		}, false),
+		Entry("should reject BGPPeerSpec with both ASNumber and PeerSelector", api.BGPPeerSpec{
+			ASNumber:     as61234,
+			PeerSelector: "has(mylabel)",
+		}, false),
+		Entry("should accept BGPPeerSpec with NodeSelector and PeerSelector", api.BGPPeerSpec{
+			NodeSelector: "has(mylabel)",
+			PeerSelector: "has(mylabel)",
+		}, true),
 
 		// (API) NodeSpec
 		Entry("should accept node with IPv4 BGP", api.NodeSpec{BGP: &api.NodeBGPSpec{IPv4Address: netv4_1}}, true),
@@ -1127,9 +1186,22 @@ func init() {
 		Entry("should reject node with an empty BGP", api.NodeSpec{BGP: &api.NodeBGPSpec{}}, false),
 		Entry("should reject node with IPv6 address in IPv4 field", api.NodeSpec{BGP: &api.NodeBGPSpec{IPv4Address: netv6_1}}, false),
 		Entry("should reject node with IPv4 address in IPv6 field", api.NodeSpec{BGP: &api.NodeBGPSpec{IPv6Address: netv4_1}}, false),
+		Entry("should reject node with bad RR cluster ID #1", api.NodeSpec{BGP: &api.NodeBGPSpec{
+			IPv4Address:             netv4_1,
+			RouteReflectorClusterID: "abcdef",
+		}}, false),
+		Entry("should reject node with bad RR cluster ID #2", api.NodeSpec{BGP: &api.NodeBGPSpec{
+			IPv4Address:             netv4_1,
+			RouteReflectorClusterID: "300.34.3.1",
+		}}, false),
+		Entry("should accept node with good RR cluster ID", api.NodeSpec{BGP: &api.NodeBGPSpec{
+			IPv4Address:             netv4_1,
+			RouteReflectorClusterID: "245.0.0.1",
+		}}, true),
 
 		// GlobalNetworkPolicy validation.
 		Entry("disallow name with invalid character", &api.GlobalNetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "t~!s.h.i.ng"}}, false),
+		Entry("disallow name with mixed case characters", &api.GlobalNetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "tHiNg"}}, false),
 		Entry("allow valid name", &api.GlobalNetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "thing"}}, true),
 		Entry("disallow k8s policy name", &api.GlobalNetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "knp.default.thing"}}, false),
 		Entry("disallow name with dot", &api.GlobalNetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "t.h.i.ng"}}, false),
@@ -1389,10 +1461,20 @@ func init() {
 				},
 			}, false,
 		),
+		Entry("disallow HTTP in egress rule",
+			&api.GlobalNetworkPolicy{
+				ObjectMeta: v1.ObjectMeta{Name: "thing"},
+				Spec: api.GlobalNetworkPolicySpec{
+					Egress: []api.Rule{{Action: "Allow", HTTP: &api.HTTPMatch{Methods: []string{"GET"}}}},
+					Types:  []api.PolicyType{api.PolicyTypeIngress, api.PolicyTypeEgress},
+				},
+			}, false,
+		),
 
 		// NetworkPolicySpec Types field checks.
 		Entry("allow valid name", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "thing"}}, true),
 		Entry("disallow name with dot", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "t.h.i.ng"}}, false),
+		Entry("disallow name with mixed case", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "tHiNg"}}, false),
 		Entry("allow valid name of 253 chars", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: string(longValue[:maxNameLength])}}, true),
 		Entry("disallow a name of 254 chars", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: string(longValue[:maxNameLength+1])}}, false),
 		Entry("allow k8s policy name", &api.NetworkPolicy{ObjectMeta: v1.ObjectMeta{Name: "knp.default.thing"}}, true),
@@ -1509,6 +1591,47 @@ func init() {
 					Types:  []api.PolicyType{api.PolicyTypeIngress, api.PolicyTypeEgress},
 				},
 			}, true,
+		),
+		Entry("disallow HTTP in egress rule",
+			&api.NetworkPolicy{
+				ObjectMeta: v1.ObjectMeta{Name: "thing"},
+				Spec: api.NetworkPolicySpec{
+					Egress: []api.Rule{{Action: "Allow", HTTP: &api.HTTPMatch{Methods: []string{"GET"}}}},
+					Types:  []api.PolicyType{api.PolicyTypeIngress, api.PolicyTypeEgress},
+				},
+			}, false,
+		),
+		Entry("allow HTTP Path with permitted match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/foo"}, {Prefix: "/bar"}}},
+			true,
+		),
+		Entry("disallow HTTP Path with invalid match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/foo", Prefix: "/bar"}, {Prefix: "/bar"}}},
+			false,
+		),
+		Entry("disallow HTTP Path with invalid match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/fo?o"}}},
+			false,
+		),
+		Entry("disallow HTTP Path with invalid match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/fo o"}}},
+			false,
+		),
+		Entry("disallow HTTP Path with invalid match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/f#oo"}}},
+			false,
+		),
+		Entry("disallow HTTP Path with invalid match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{Exact: "/fo#!?o"}}},
+			false,
+		),
+		Entry("disallow HTTP Path with empty match clauses",
+			&api.HTTPMatch{Paths: []api.HTTPPath{{}}},
+			false,
+		),
+		Entry("disallow HTTP Method with duplicate match clause",
+			&api.HTTPMatch{Methods: []string{"GET", "GET", "Foo"}},
+			false,
 		),
 	)
 }

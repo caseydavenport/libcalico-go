@@ -15,6 +15,8 @@
 package conversion
 
 import (
+	"os"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -42,6 +44,14 @@ var _ = Describe("Test parsing strings", func() {
 		Expect(weid.Orchestrator).To(Equal("k8s"))
 		Expect(weid.Endpoint).To(Equal("eth0"))
 		Expect(weid.Pod).To(Equal("pod-name"))
+	})
+
+	It("generate a veth name with the right prefix", func() {
+		os.Setenv("FELIX_INTERFACEPREFIX", "eni,veth,foo")
+		defer os.Setenv("FELIX_INTERFACEPREFIX", "")
+
+		name := VethNameForWorkload("namespace", "podname")
+		Expect(name).To(Equal("eni82111e10a96"))
 	})
 
 	It("should parse valid profile names", func() {
@@ -85,20 +95,20 @@ var _ = Describe("Test parsing strings", func() {
 
 var _ = Describe("Test selector conversion", func() {
 	DescribeTable("selector conversion table",
-		func(inSelector metav1.LabelSelector, selectorType selectorType, expected string) {
+		func(inSelector *metav1.LabelSelector, selectorType selectorType, expected string) {
 			// First, convert the NetworkPolicy using the k8s conversion logic.
 			c := Converter{}
 
-			converted := c.k8sSelectorToCalico(&inSelector, selectorType)
+			converted := c.k8sSelectorToCalico(inSelector, selectorType)
 
 			// Finally, assert the expected result.
 			Expect(converted).To(Equal(expected))
 		},
 
-		Entry("should handle an empty pod selector", metav1.LabelSelector{}, SelectorPod, "projectcalico.org/orchestrator == 'k8s'"),
-		Entry("should handle an empty namespace selector", metav1.LabelSelector{}, SelectorNamespace, ""),
+		Entry("should handle an empty pod selector", &metav1.LabelSelector{}, SelectorPod, "projectcalico.org/orchestrator == 'k8s'"),
+		Entry("should handle an empty namespace selector", &metav1.LabelSelector{}, SelectorNamespace, "all()"),
 		Entry("should handle an OpDoesNotExist namespace selector",
-			metav1.LabelSelector{
+			&metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "toast", Operator: metav1.LabelSelectorOpDoesNotExist},
 				},
@@ -107,7 +117,7 @@ var _ = Describe("Test selector conversion", func() {
 			"! has(toast)",
 		),
 		Entry("should handle an OpExists namespace selector",
-			metav1.LabelSelector{
+			&metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "toast", Operator: metav1.LabelSelectorOpExists},
 				},
@@ -116,7 +126,7 @@ var _ = Describe("Test selector conversion", func() {
 			"has(toast)",
 		),
 		Entry("should handle an OpIn namespace selector",
-			metav1.LabelSelector{
+			&metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "toast", Operator: metav1.LabelSelectorOpIn, Values: []string{"butter", "jam"}},
 				},
@@ -125,7 +135,7 @@ var _ = Describe("Test selector conversion", func() {
 			"toast in { 'butter', 'jam' }",
 		),
 		Entry("should handle an OpNotIn namespace selector",
-			metav1.LabelSelector{
+			&metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "toast", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"marmite", "milk"}},
 				},
@@ -134,7 +144,7 @@ var _ = Describe("Test selector conversion", func() {
 			"toast not in { 'marmite', 'milk' }",
 		),
 		Entry("should handle an OpDoesNotExist pod selector",
-			metav1.LabelSelector{
+			&metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{Key: "toast", Operator: metav1.LabelSelectorOpDoesNotExist},
 				},
@@ -142,6 +152,8 @@ var _ = Describe("Test selector conversion", func() {
 			SelectorPod,
 			"projectcalico.org/orchestrator == 'k8s' && ! has(toast)",
 		),
+		Entry("should handle nil pod selector", nil, SelectorPod, "projectcalico.org/orchestrator == 'k8s'"),
+		Entry("should handle nil namespace selector", nil, SelectorNamespace, ""),
 	)
 })
 
@@ -287,6 +299,38 @@ var _ = Describe("Test Pod conversion", func() {
 		Expect(wep.Value.(*apiv3.WorkloadEndpoint).Spec.IPNetworks).To(ConsistOf("192.168.0.1/32"))
 	})
 
+	It("should look in the calico annotation for a floating IP", func() {
+		pod := kapiv1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "podA",
+				Namespace: "default",
+				Annotations: map[string]string{
+					"arbitrary":                         "annotation",
+					"cni.projectcalico.org/podIP":       "192.168.0.1",
+					"cni.projectcalico.org/floatingIPs": "[\"1.1.1.1\"]",
+				},
+				Labels: map[string]string{
+					"labelA": "valueA",
+					"labelB": "valueB",
+				},
+				ResourceVersion: "1234",
+			},
+			Spec: kapiv1.PodSpec{
+				NodeName:   "nodeA",
+				Containers: []kapiv1.Container{},
+			},
+		}
+
+		wep, err := c.PodToWorkloadEndpoint(&pod)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.HasIPAddress(&pod)).To(BeTrue())
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).Spec.IPNetworks).To(ConsistOf("192.168.0.1/32"))
+
+		// Assert that the endpoint contains the appropriate DNAT
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).Spec.IPNATs).To(ConsistOf(apiv3.IPNAT{InternalIP: "192.168.0.1", ExternalIP: "1.1.1.1"}))
+
+	})
+
 	It("should return an error for a bad pod IP", func() {
 		pod := kapiv1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -415,6 +459,100 @@ var _ = Describe("Test Pod conversion", func() {
 		Expect(err).To(HaveOccurred())
 	})
 
+	It("should parse a Pod with serviceaccount", func() {
+		pod := kapiv1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "podA",
+				Namespace: "default",
+				Annotations: map[string]string{
+					"arbitrary": "annotation",
+				},
+				Labels: map[string]string{
+					"labelA": "valueA",
+					"labelB": "valueB",
+				},
+				ResourceVersion: "1234",
+			},
+			Spec: kapiv1.PodSpec{
+				NodeName:           "nodeA",
+				ServiceAccountName: "sa-test",
+				Containers: []kapiv1.Container{
+					{
+						Ports: []kapiv1.ContainerPort{
+							{
+								ContainerPort: 5678,
+							},
+							{
+								Name:          "no-proto",
+								ContainerPort: 1234,
+							},
+						},
+					},
+					{
+						Ports: []kapiv1.ContainerPort{
+							{
+								Name:          "tcp-proto",
+								Protocol:      kapiv1.ProtocolTCP,
+								ContainerPort: 1024,
+							},
+						},
+					},
+				},
+			},
+			Status: kapiv1.PodStatus{
+				PodIP: "192.168.0.1",
+			},
+		}
+
+		wep, err := c.PodToWorkloadEndpoint(&pod)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Make sure the type information is correct.
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).Kind).To(Equal(apiv3.KindWorkloadEndpoint))
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).APIVersion).To(Equal(apiv3.GroupVersionCurrent))
+
+		// Assert key fields.
+		Expect(wep.Key.(model.ResourceKey).Name).To(Equal("nodeA-k8s-podA-eth0"))
+		Expect(wep.Key.(model.ResourceKey).Namespace).To(Equal("default"))
+		Expect(wep.Key.(model.ResourceKey).Kind).To(Equal(apiv3.KindWorkloadEndpoint))
+
+		// Check for only values that are ServiceAccount related.
+		Expect(len(wep.Value.(*apiv3.WorkloadEndpoint).Spec.Profiles)).To(Equal(2))
+		expectedLabels := map[string]string{
+			"labelA":                         "valueA",
+			"labelB":                         "valueB",
+			"projectcalico.org/namespace":    "default",
+			"projectcalico.org/orchestrator": "k8s",
+			apiv3.LabelServiceAccount:        "sa-test",
+		}
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).ObjectMeta.Labels).To(Equal(expectedLabels))
+
+		// Assert ResourceVersion is present.
+		Expect(wep.Revision).To(Equal("1234"))
+	})
+
+	It("should parse a Pod with GenerateName set in metadata", func() {
+		gname := "generatedname"
+		pod := kapiv1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:         "podA",
+				Namespace:    "default",
+				GenerateName: gname,
+			},
+			Spec: kapiv1.PodSpec{
+				NodeName: "nodeA",
+			},
+			Status: kapiv1.PodStatus{
+				PodIP: "192.168.0.1",
+			},
+		}
+
+		wep, err := c.PodToWorkloadEndpoint(&pod)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Make sure the GenerateName information is correct.
+		Expect(wep.Value.(*apiv3.WorkloadEndpoint).GenerateName).To(Equal(gname))
+	})
 })
 
 var _ = Describe("Test NetworkPolicy conversion", func() {
@@ -997,6 +1135,52 @@ var _ = Describe("Test NetworkPolicy conversion", func() {
 		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
 	})
 
+	It("should parse a NetworkPolicy with a nil namespace selector", func() {
+		np := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test.policy",
+				Namespace: "default",
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"label": "value"},
+				},
+				Ingress: []networkingv1.NetworkPolicyIngressRule{
+					{
+						From: []networkingv1.NetworkPolicyPeer{
+							{
+								NamespaceSelector: nil,
+								PodSelector:       &metav1.LabelSelector{},
+							},
+						},
+					},
+				},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			},
+		}
+
+		// Parse the policy.
+		pol, err := c.K8sNetworkPolicyToCalico(&np)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Assert key fields are correct.
+		Expect(pol.Key.(model.ResourceKey).Name).To(Equal("knp.default.test.policy"))
+
+		// Assert value fields are correct.
+		Expect(int(*pol.Value.(*apiv3.NetworkPolicy).Spec.Order)).To(Equal(1000))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s' && label == 'value'"))
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress)).To(Equal(1))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s'"))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.NamespaceSelector).To(Equal(""))
+
+		// There should be no Egress rules.
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress)).To(Equal(0))
+
+		// Check that Types field exists and has only 'ingress'
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Types)).To(Equal(1))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
+	})
+
 	It("should parse a NetworkPolicy with an empty namespaceSelector", func() {
 		np := networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1034,6 +1218,63 @@ var _ = Describe("Test NetworkPolicy conversion", func() {
 		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s' && label == 'value'"))
 		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress)).To(Equal(1))
 		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s'"))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.NamespaceSelector).To(Equal("all()"))
+
+		// There should be no Egress rules.
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress)).To(Equal(0))
+
+		// Check that Types field exists and has only 'ingress'
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Types)).To(Equal(1))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
+	})
+
+	It("should parse a NetworkPolicy with pod and namespace selectors", func() {
+		np := networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test.policy",
+				Namespace: "default",
+			},
+			Spec: networkingv1.NetworkPolicySpec{
+				PodSelector: metav1.LabelSelector{
+					MatchLabels: map[string]string{"label": "value"},
+				},
+				Ingress: []networkingv1.NetworkPolicyIngressRule{
+					{
+						From: []networkingv1.NetworkPolicyPeer{
+							{
+								NamespaceSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{
+										"namespaceRole": "dev",
+										"namespaceFoo":  "bar",
+									},
+								},
+								PodSelector: &metav1.LabelSelector{
+									MatchLabels: map[string]string{
+										"podA": "B",
+										"podC": "D",
+									},
+								},
+							},
+						},
+					},
+				},
+				PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			},
+		}
+
+		// Parse the policy.
+		pol, err := c.K8sNetworkPolicyToCalico(&np)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Assert key fields are correct.
+		Expect(pol.Key.(model.ResourceKey).Name).To(Equal("knp.default.test.policy"))
+
+		// Assert value fields are correct.
+		Expect(int(*pol.Value.(*apiv3.NetworkPolicy).Spec.Order)).To(Equal(1000))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s' && label == 'value'"))
+		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress)).To(Equal(1))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s' && podA == 'B' && podC == 'D'"))
+		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.NamespaceSelector).To(Equal("namespaceFoo == 'bar' && namespaceRole == 'dev'"))
 
 		// There should be no Egress rules.
 		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress)).To(Equal(0))
@@ -1705,51 +1946,6 @@ var _ = Describe("Test NetworkPolicy conversion (k8s <= 1.7, no policyTypes)", f
 		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
 	})
 
-	It("should parse a NetworkPolicy with an empty namespaceSelector", func() {
-		np := networkingv1.NetworkPolicy{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test.policy",
-				Namespace: "default",
-			},
-			Spec: networkingv1.NetworkPolicySpec{
-				PodSelector: metav1.LabelSelector{
-					MatchLabels: map[string]string{"label": "value"},
-				},
-				Ingress: []networkingv1.NetworkPolicyIngressRule{
-					{
-						From: []networkingv1.NetworkPolicyPeer{
-							{
-								NamespaceSelector: &metav1.LabelSelector{
-									MatchLabels: map[string]string{},
-								},
-							},
-						},
-					},
-				},
-			},
-		}
-
-		// Parse the policy.
-		pol, err := c.K8sNetworkPolicyToCalico(&np)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Assert key fields are correct.
-		Expect(pol.Key.(model.ResourceKey).Name).To(Equal("knp.default.test.policy"))
-
-		// Assert value fields are correct.
-		Expect(int(*pol.Value.(*apiv3.NetworkPolicy).Spec.Order)).To(Equal(1000))
-		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s' && label == 'value'"))
-		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress)).To(Equal(1))
-		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Ingress[0].Source.Selector).To(Equal("projectcalico.org/orchestrator == 'k8s'"))
-
-		// There should be no Egress rule.
-		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Egress)).To(Equal(0))
-
-		// Check that Types field exists and has only 'ingress'
-		Expect(len(pol.Value.(*apiv3.NetworkPolicy).Spec.Types)).To(Equal(1))
-		Expect(pol.Value.(*apiv3.NetworkPolicy).Spec.Types[0]).To(Equal(apiv3.PolicyTypeIngress))
-	})
-
 	It("should parse a NetworkPolicy with podSelector.MatchExpressions", func() {
 		np := networkingv1.NetworkPolicy{
 			ObjectMeta: metav1.ObjectMeta{
@@ -2026,7 +2222,7 @@ var _ = Describe("Test Namespace conversion", func() {
 var _ = Describe("Test ServiceAccount conversion", func() {
 
 	// Use a single instance of the Converter for these tests.
-	c := Converter{AlphaSA: true}
+	c := Converter{}
 
 	It("should parse a ServiceAccount in default namespace to a Profile", func() {
 		sa := kapiv1.ServiceAccount{
@@ -2095,7 +2291,7 @@ var _ = Describe("Test ServiceAccount conversion", func() {
 		Expect(len(labels)).To(Equal(0))
 	})
 
-	It("should handle ServiceAccount resource versions, with feature flag set", func() {
+	It("should handle ServiceAccount resource versions", func() {
 		By("converting ns and sa versions to the correct combined version")
 		rev := c.JoinProfileRevisions("1234", "5678")
 		Expect(rev).To(Equal("1234/5678"))
@@ -2139,114 +2335,4 @@ var _ = Describe("Test ServiceAccount conversion", func() {
 		_, _, err = c.SplitProfileRevision("1234/5678/1313")
 		Expect(err).To(HaveOccurred())
 	})
-
-	It("should handle ServiceAccount resource versions, with feature flag unset", func() {
-		// When AlphaSA == false profile ignore the saRev completely.
-		c.AlphaSA = false
-		By("returning only the ns version")
-		rev := c.JoinProfileRevisions("1234", "5678")
-		Expect(rev).To(Equal("1234"))
-
-		rev = c.JoinProfileRevisions("", "5678")
-		Expect(rev).To(Equal(""))
-
-		rev = c.JoinProfileRevisions("1234", "")
-		Expect(rev).To(Equal("1234"))
-
-		By("extracting only the input version without spliting")
-		nsRev, saRev, err := c.SplitProfileRevision("")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(nsRev).To(Equal(""))
-		Expect(saRev).To(Equal(""))
-
-		nsRev, saRev, err = c.SplitProfileRevision("1234/5678")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(nsRev).To(Equal("1234/5678"))
-		Expect(saRev).To(Equal(""))
-
-		nsRev, saRev, err = c.SplitProfileRevision("1234")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(nsRev).To(Equal("1234"))
-		Expect(saRev).To(Equal(""))
-
-	})
-})
-
-var _ = Describe("Test Pod conversion with alpha feature flag", func() {
-
-	// Use a single instance of the Converter for these tests.
-	c := Converter{AlphaSA: true}
-
-	It("should parse a Pod with serviceaccount", func() {
-		pod := kapiv1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "podA",
-				Namespace: "default",
-				Annotations: map[string]string{
-					"arbitrary": "annotation",
-				},
-				Labels: map[string]string{
-					"labelA": "valueA",
-					"labelB": "valueB",
-				},
-				ResourceVersion: "1234",
-			},
-			Spec: kapiv1.PodSpec{
-				NodeName:           "nodeA",
-				ServiceAccountName: "sa-test",
-				Containers: []kapiv1.Container{
-					{
-						Ports: []kapiv1.ContainerPort{
-							{
-								ContainerPort: 5678,
-							},
-							{
-								Name:          "no-proto",
-								ContainerPort: 1234,
-							},
-						},
-					},
-					{
-						Ports: []kapiv1.ContainerPort{
-							{
-								Name:          "tcp-proto",
-								Protocol:      kapiv1.ProtocolTCP,
-								ContainerPort: 1024,
-							},
-						},
-					},
-				},
-			},
-			Status: kapiv1.PodStatus{
-				PodIP: "192.168.0.1",
-			},
-		}
-
-		wep, err := c.PodToWorkloadEndpoint(&pod)
-		Expect(err).NotTo(HaveOccurred())
-
-		// Make sure the type information is correct.
-		Expect(wep.Value.(*apiv3.WorkloadEndpoint).Kind).To(Equal(apiv3.KindWorkloadEndpoint))
-		Expect(wep.Value.(*apiv3.WorkloadEndpoint).APIVersion).To(Equal(apiv3.GroupVersionCurrent))
-
-		// Assert key fields.
-		Expect(wep.Key.(model.ResourceKey).Name).To(Equal("nodeA-k8s-podA-eth0"))
-		Expect(wep.Key.(model.ResourceKey).Namespace).To(Equal("default"))
-		Expect(wep.Key.(model.ResourceKey).Kind).To(Equal(apiv3.KindWorkloadEndpoint))
-
-		// Check for only values that are controlled by the alphaSA flag
-		Expect(len(wep.Value.(*apiv3.WorkloadEndpoint).Spec.Profiles)).To(Equal(2))
-		expectedLabels := map[string]string{
-			"labelA":                         "valueA",
-			"labelB":                         "valueB",
-			"projectcalico.org/namespace":    "default",
-			"projectcalico.org/orchestrator": "k8s",
-			apiv3.LabelServiceAccount:        "sa-test",
-		}
-		Expect(wep.Value.(*apiv3.WorkloadEndpoint).ObjectMeta.Labels).To(Equal(expectedLabels))
-
-		// Assert ResourceVersion is present.
-		Expect(wep.Revision).To(Equal("1234"))
-	})
-
 })

@@ -42,7 +42,7 @@ var (
 	labelValueRegex     = regexp.MustCompile("^[a-zA-Z0-9]?([a-zA-Z0-9_.-]{0,61}[a-zA-Z0-9])?$")
 	nameRegex           = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,128}$")
 	namespacedNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_./-]{1,128}$`)
-	interfaceRegex      = regexp.MustCompile("^[a-zA-Z0-9_-]{1,15}$")
+	interfaceRegex      = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")
 	actionRegex         = regexp.MustCompile("^(allow|deny|log|pass)$")
 	backendActionRegex  = regexp.MustCompile("^(allow|deny|log|next-tier|)$")
 	protocolRegex       = regexp.MustCompile("^(tcp|udp|icmp|icmpv6|sctp|udplite)$")
@@ -161,7 +161,7 @@ func validateAction(v *validator.Validate, topStruct reflect.Value, currentStruc
 func validateInterface(v *validator.Validate, topStruct reflect.Value, currentStructOrField reflect.Value, field reflect.Value, fieldType reflect.Type, fieldKind reflect.Kind, param string) bool {
 	s := field.String()
 	log.Debugf("Validate interface: %s", s)
-	return interfaceRegex.MatchString(s)
+	return s == "*" || interfaceRegex.MatchString(s)
 }
 
 func validateBackendAction(v *validator.Validate, topStruct reflect.Value, currentStructOrField reflect.Value, field reflect.Value, fieldType reflect.Type, fieldKind reflect.Kind, param string) bool {

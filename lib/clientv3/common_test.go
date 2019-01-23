@@ -31,14 +31,18 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/testutils"
 )
 
+var MatchResource = testutils.Resource
+
 var _ = testutils.E2eDatastoreDescribe("Common resource tests", testutils.DatastoreAll, func(config apiconfig.CalicoAPIConfig) {
 	Describe("Common resource tests", func() {
 		It("Should return the data that was stored in the datastore, even if it was changed", func() {
 			ctx := context.Background()
 			name1 := "ippool-1"
 			spec1 := apiv3.IPPoolSpec{
-				CIDR:     "1.2.3.0/24",
-				IPIPMode: apiv3.IPIPModeAlways,
+				CIDR:         "1.2.3.0/24",
+				IPIPMode:     apiv3.IPIPModeAlways,
+				BlockSize:    26,
+				NodeSelector: "all()",
 			}
 			c, err := clientv3.New(config)
 			Expect(err).NotTo(HaveOccurred())
@@ -54,7 +58,7 @@ var _ = testutils.E2eDatastoreDescribe("Common resource tests", testutils.Datast
 				Spec:       spec1,
 			}, options.SetOptions{})
 			Expect(outError).NotTo(HaveOccurred())
-			testutils.ExpectResource(res1, apiv3.KindIPPool, testutils.ExpectNoNamespace, name1, spec1)
+			Expect(res1).To(MatchResource(apiv3.KindIPPool, testutils.ExpectNoNamespace, name1, spec1))
 			// Make sure that the timestamp is the same except for the inclusion of nanoseconds
 			timestamp := res1.GetObjectMeta().GetCreationTimestamp()
 			Expect(timestamp.Day()).To(Equal(now.Day()))
@@ -73,7 +77,7 @@ var _ = testutils.E2eDatastoreDescribe("Common resource tests", testutils.Datast
 			Expect(outError).NotTo(HaveOccurred())
 			// The pool will first be disabled, so tweak the Disabled field before doing the comparison.
 			spec1.Disabled = true
-			testutils.ExpectResource(dres, apiv3.KindIPPool, testutils.ExpectNoNamespace, name1, spec1)
+			Expect(dres).To(MatchResource(apiv3.KindIPPool, testutils.ExpectNoNamespace, name1, spec1))
 		})
 	})
 })

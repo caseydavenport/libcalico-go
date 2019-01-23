@@ -21,7 +21,7 @@ import (
 	"regexp"
 	"strings"
 
-	validator "gopkg.in/go-playground/validator.v8"
+	"gopkg.in/go-playground/validator.v8"
 
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +32,7 @@ import (
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/numorstring"
 	"github.com/projectcalico/libcalico-go/lib/selector"
+	"github.com/projectcalico/libcalico-go/lib/set"
 )
 
 // Split the validation into three groups.  Since a struct validator will trump
@@ -56,13 +57,13 @@ var (
 	containerIDRegex = regexp.MustCompile("^" + containerIDFmt + "$")
 
 	// NetworkPolicy names must either be a simple DNS1123 label format (nameLabelFmt), or
-	// must be the standard name format (nameRegex) prefixed with "knp.default".
-	networkPolicyNameRegex = regexp.MustCompile("^((" + nameLabelFmt + ")|(knp\\.default\\.(" + nameSubdomainFmt + ")))$")
+	// must be the standard name format (nameRegex) prefixed with "knp.default" or "ossg.default".
+	networkPolicyNameRegex = regexp.MustCompile("^((" + nameLabelFmt + ")|((?:knp|ossg)\\.default\\.(" + nameSubdomainFmt + ")))$")
 
 	// GlobalNetworkPolicy names must be a simple DNS1123 label format (nameLabelFmt).
 	globalNetworkPolicyNameRegex = regexp.MustCompile("^(" + nameLabelFmt + ")$")
 
-	interfaceRegex        = regexp.MustCompile("^[a-zA-Z0-9_-]{1,15}$")
+	interfaceRegex        = regexp.MustCompile("^[a-zA-Z0-9_.-]{1,15}$")
 	actionRegex           = regexp.MustCompile("^(Allow|Deny|Log|Pass)$")
 	protocolRegex         = regexp.MustCompile("^(TCP|UDP|ICMP|ICMPv6|SCTP|UDPLite)$")
 	ipipModeRegex         = regexp.MustCompile("^(Always|CrossSubnet|Never)$")
@@ -71,8 +72,6 @@ var (
 	dropAcceptReturnRegex = regexp.MustCompile("^(Drop|Accept|Return)$")
 	acceptReturnRegex     = regexp.MustCompile("^(Accept|Return)$")
 	reasonString          = "Reason: "
-	poolSmallIPv4         = "IP pool size is too small (min /26) for use with Calico IPAM"
-	poolSmallIPv6         = "IP pool size is too small (min /122) for use with Calico IPAM"
 	poolUnstictCIDR       = "IP pool CIDR is not strictly masked"
 	overlapsV4LinkLocal   = "IP pool range overlaps with IPv4 Link Local range 169.254.0.0/16"
 	overlapsV6LinkLocal   = "IP pool range overlaps with IPv6 Link Local range fe80::/10"
@@ -118,7 +117,7 @@ func convertError(err error) errors.ErrorValidation {
 			errors.ErroredField{
 				Name:   f.Name,
 				Value:  f.Value,
-				Reason: extractReason(f.Tag),
+				Reason: extractReason(f),
 			})
 	}
 	return verr
@@ -171,12 +170,14 @@ func init() {
 	registerStructValidator(validatorPrimary, validateIPPoolSpec, api.IPPoolSpec{})
 	registerStructValidator(validatorPrimary, validateNodeSpec, api.NodeSpec{})
 	registerStructValidator(validatorPrimary, validateObjectMeta, metav1.ObjectMeta{})
+	registerStructValidator(validatorPrimary, validateHTTPRule, api.HTTPMatch{})
 
 	// Register structs that have one level of additional structs to validate.
 	registerStructValidator(validatorSecondary, validateFelixConfigSpec, api.FelixConfigurationSpec{})
 	registerStructValidator(validatorSecondary, validateWorkloadEndpointSpec, api.WorkloadEndpointSpec{})
 	registerStructValidator(validatorSecondary, validateHostEndpointSpec, api.HostEndpointSpec{})
 	registerStructValidator(validatorSecondary, validateRule, api.Rule{})
+	registerStructValidator(validatorSecondary, validateBGPPeerSpec, api.BGPPeerSpec{})
 
 	// Register structs that have two level of additional structs to validate.
 	registerStructValidator(validatorTertiary, validateNetworkPolicy, api.NetworkPolicy{})
@@ -193,11 +194,15 @@ func reason(r string) string {
 
 // extractReason extracts the error reason from the field tag in a validator
 // field error (if there is one).
-func extractReason(tag string) string {
-	if strings.HasPrefix(tag, reasonString) {
-		return strings.TrimPrefix(tag, reasonString)
+func extractReason(e *validator.FieldError) string {
+	if strings.HasPrefix(e.Tag, reasonString) {
+		return strings.TrimPrefix(e.Tag, reasonString)
 	}
-	return ""
+	return fmt.Sprintf("%sfailed to validate Field: %s because of Tag: %s ",
+		reasonString,
+		e.Field,
+		e.Tag,
+	)
 }
 
 func registerFieldValidator(key string, fn validator.Func) {
@@ -222,7 +227,7 @@ func validateAction(v *validator.Validate, topStruct reflect.Value, currentStruc
 func validateInterface(v *validator.Validate, topStruct reflect.Value, currentStructOrField reflect.Value, field reflect.Value, fieldType reflect.Type, fieldKind reflect.Kind, param string) bool {
 	s := field.String()
 	log.Debugf("Validate interface: %s", s)
-	return interfaceRegex.MatchString(s)
+	return s == "*" || interfaceRegex.MatchString(s)
 }
 
 func validateDatastoreType(v *validator.Validate, topStruct reflect.Value, currentStructOrField reflect.Value, field reflect.Value, fieldType reflect.Type, fieldKind reflect.Kind, param string) bool {
@@ -427,6 +432,49 @@ func validateCIDR(v *validator.Validate, topStruct reflect.Value, currentStructO
 	return err == nil
 }
 
+// validateHTTPMethods checks if the HTTP method match clauses are valid.
+func validateHTTPMethods(methods []string) error {
+	// check for duplicates
+	s := set.FromArray(methods)
+	if s.Len() != len(methods) {
+		return fmt.Errorf("Invalid methods (duplicates): %v", methods)
+	}
+	return nil
+}
+
+// validateHTTPPaths checks if the HTTP path match clauses are valid.
+func validateHTTPPaths(paths []api.HTTPPath) error {
+	for _, path := range paths {
+		if path.Exact != "" && path.Prefix != "" {
+			return fmt.Errorf("Invalid path match. Both 'exact' and 'prefix' are set")
+		}
+		v := path.Exact
+		if v == "" {
+			v = path.Prefix
+		}
+		if v == "" {
+			return fmt.Errorf("Invalid path match. Either 'exact' or 'prefix' must be set")
+		}
+		// Checks from https://tools.ietf.org/html/rfc3986#page-22
+		if !strings.HasPrefix(v, "/") ||
+			strings.ContainsAny(v, "? #") {
+			return fmt.Errorf("Invalid path %s. (must start with `/` and not contain `?` or `#`", v)
+		}
+	}
+	return nil
+}
+
+func validateHTTPRule(v *validator.Validate, structLevel *validator.StructLevel) {
+	h := structLevel.CurrentStruct.Interface().(api.HTTPMatch)
+	log.Debugf("Validate HTTP Rule: %v", h)
+	if err := validateHTTPMethods(h.Methods); err != nil {
+		structLevel.ReportError(reflect.ValueOf(h.Methods), "Methods", "", reason(err.Error()))
+	}
+	if err := validateHTTPPaths(h.Paths); err != nil {
+		structLevel.ReportError(reflect.ValueOf(h.Paths), "Paths", "", reason(err.Error()))
+	}
+}
+
 func validatePort(v *validator.Validate, structLevel *validator.StructLevel) {
 	p := structLevel.CurrentStruct.Interface().(numorstring.Port)
 
@@ -494,6 +542,35 @@ func validateFelixConfigSpec(v *validator.Validate, structLevel *validator.Struc
 					"KubeNodePortRanges", "",
 					reason("node port ranges should not contain named ports"))
 			}
+		}
+	}
+
+	// Validate that the externalNodesCIDRList is composed of valid cidr's.
+	if c.ExternalNodesCIDRList != nil {
+		for _, cidr := range *c.ExternalNodesCIDRList {
+			log.Debugf("Cidr is: %s", cidr)
+			ip, _, err := cnet.ParseCIDROrIP(cidr)
+			if err != nil {
+				structLevel.ReportError(reflect.ValueOf(cidr),
+					"ExternalNodesCIDRList", "", reason("has invalid CIDR(s)"))
+			} else if ip.Version() != 4 {
+				structLevel.ReportError(reflect.ValueOf(cidr),
+					"ExternalNodesCIDRList", "", reason("has invalid IPv6 CIDR"))
+			}
+		}
+	}
+
+	// Validate that the OpenStack region is suitable for use in a namespace name.
+	const regionNamespacePrefix = "openstack-region-"
+	const maxRegionLength int = k8svalidation.DNS1123LabelMaxLength - len(regionNamespacePrefix)
+	if len(c.OpenstackRegion) > maxRegionLength {
+		structLevel.ReportError(reflect.ValueOf(c.OpenstackRegion),
+			"OpenstackRegion", "", reason("is too long"))
+	} else if len(c.OpenstackRegion) > 0 {
+		problems := k8svalidation.IsDNS1123Label(c.OpenstackRegion)
+		if len(problems) > 0 {
+			structLevel.ReportError(reflect.ValueOf(c.OpenstackRegion),
+				"OpenstackRegion", "", reason("must be a valid DNS label"))
 		}
 	}
 }
@@ -615,19 +692,23 @@ func validateIPPoolSpec(v *validator.Validate, structLevel *validator.StructLeve
 			"IPpool.IPIPMode", "", reason("IPIPMode other than 'Never' is not supported on an IPv6 IP pool"))
 	}
 
+	// Default the blockSize
+	if pool.BlockSize == 0 {
+		if ipAddr.Version() == 4 {
+			pool.BlockSize = 26
+		} else {
+			pool.BlockSize = 122
+		}
+	}
+
 	// The Calico IPAM places restrictions on the minimum IP pool size.  If
 	// the ippool is enabled, check that the pool is at least the minimum size.
 	if !pool.Disabled {
-		ones, bits := cidr.Mask.Size()
-		log.Debugf("Pool CIDR: %s, num bits: %d", cidr.String(), bits-ones)
-		if bits-ones < 6 {
-			if cidr.Version() == 4 {
-				structLevel.ReportError(reflect.ValueOf(pool.CIDR),
-					"IPpool.CIDR", "", reason(poolSmallIPv4))
-			} else {
-				structLevel.ReportError(reflect.ValueOf(pool.CIDR),
-					"IPpool.CIDR", "", reason(poolSmallIPv6))
-			}
+		ones, _ := cidr.Mask.Size()
+		log.Debugf("Pool CIDR: %s, mask: %d, blockSize: %d", cidr.String(), ones, pool.BlockSize)
+		if ones > pool.BlockSize {
+			structLevel.ReportError(reflect.ValueOf(pool.CIDR),
+				"IPpool.CIDR", "", reason("IP pool size is too small for use with Calico IPAM. It must be equal to or greater than the block size."))
 		}
 	}
 
@@ -745,6 +826,12 @@ func validateRule(v *validator.Validate, structLevel *validator.StructLevel) {
 	scanNets(rule.Source.NotNets, "Source.NotNets")
 	scanNets(rule.Destination.Nets, "Destination.Nets")
 	scanNets(rule.Destination.NotNets, "Destination.NotNets")
+
+	usesALP, alpValue, alpField := ruleUsesAppLayerPolicy(&rule)
+	if rule.Action != api.Allow && usesALP {
+		structLevel.ReportError(alpValue, alpField,
+			"", reason("only valid for Allow rules"))
+	}
 }
 
 func validateNodeSpec(v *validator.Validate, structLevel *validator.StructLevel) {
@@ -755,6 +842,23 @@ func validateNodeSpec(v *validator.Validate, structLevel *validator.StructLevel)
 			structLevel.ReportError(reflect.ValueOf(ns.BGP), "BGP", "",
 				reason("Spec.BGP should not be empty"))
 		}
+	}
+}
+
+func validateBGPPeerSpec(v *validator.Validate, structLevel *validator.StructLevel) {
+	ps := structLevel.CurrentStruct.Interface().(api.BGPPeerSpec)
+
+	if ps.Node != "" && ps.NodeSelector != "" {
+		structLevel.ReportError(reflect.ValueOf(ps.Node), "Node", "",
+			reason("Node field must be empty when NodeSelector is specified"))
+	}
+	if ps.PeerIP != "" && ps.PeerSelector != "" {
+		structLevel.ReportError(reflect.ValueOf(ps.PeerIP), "PeerIP", "",
+			reason("PeerIP field must be empty when PeerSelector is specified"))
+	}
+	if uint32(ps.ASNumber) != 0 && ps.PeerSelector != "" {
+		structLevel.ReportError(reflect.ValueOf(ps.ASNumber), "ASNumber", "",
+			reason("ASNumber field must be empty when PeerSelector is specified"))
 	}
 }
 
@@ -850,6 +954,16 @@ func validateNetworkPolicy(v *validator.Validate, structLevel *validator.StructL
 
 	validateObjectMetaAnnotations(v, structLevel, np.Annotations)
 	validateObjectMetaLabels(v, structLevel, np.Labels)
+
+	// Check (and disallow) rules with application layer policy for egress rules.
+	if len(spec.Egress) > 0 {
+		for _, r := range spec.Egress {
+			useALP, v, f := ruleUsesAppLayerPolicy(&r)
+			if useALP {
+				structLevel.ReportError(v, f, "", reason("not allowed in egress rule"))
+			}
+		}
+	}
 }
 
 func validateGlobalNetworkSet(v *validator.Validate, structLevel *validator.StructLevel) {
@@ -930,6 +1044,16 @@ func validateGlobalNetworkPolicy(v *validator.Validate, structLevel *validator.S
 			mp[t] = true
 		}
 	}
+
+	// Check (and disallow) rules with application layer policy for egress rules.
+	if len(spec.Egress) > 0 {
+		for _, r := range spec.Egress {
+			useALP, v, f := ruleUsesAppLayerPolicy(&r)
+			if useALP {
+				structLevel.ReportError(v, f, "", reason("not allowed in egress rules"))
+			}
+		}
+	}
 }
 
 func validateObjectMetaAnnotations(v *validator.Validate, structLevel *validator.StructLevel, annotations map[string]string) {
@@ -975,4 +1099,14 @@ func validateObjectMetaLabels(v *validator.Validate, structLevel *validator.Stru
 			)
 		}
 	}
+}
+
+// ruleUsesAppLayerPolicy checks if a rule uses application layer policy, and
+// if it does, returns true and the type of application layer clause. If it does
+// not it returns false and the empty string.
+func ruleUsesAppLayerPolicy(rule *api.Rule) (bool, reflect.Value, string) {
+	if rule.HTTP != nil {
+		return true, reflect.ValueOf(rule.HTTP), "HTTP"
+	}
+	return false, reflect.Value{}, ""
 }
