@@ -31,10 +31,14 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend"
 	bapi "github.com/projectcalico/libcalico-go/lib/backend/api"
+	"github.com/projectcalico/libcalico-go/lib/backend/k8s"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/testutils"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 // Implement an IP pools accessor for the IPAM client.  This is a "mock" version
@@ -107,11 +111,17 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 	// tests.
 	var bc bapi.Client
 	var ic Interface
+	var kc *kubernetes.Clientset
 	BeforeEach(func() {
 		var err error
 		bc, err = backend.NewClient(config)
 		Expect(err).NotTo(HaveOccurred())
 		ic = NewIPAMClient(bc, ipPools)
+
+		// If running in KDD mode, extract the k8s clientset.
+		if config.Spec.DatastoreType == "kubernetes" {
+			kc = bc.(*k8s.KubeClient).ClientSet
+		}
 	})
 
 	Context("Measuring allocation performance", func() {
@@ -138,11 +148,11 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 		}
 
 		BeforeEach(func() {
-			applyNode(bc, hostname, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, hostname, map[string]string{"foo": "bar"})
 		})
 
 		AfterEach(func() {
-			deleteNode(bc, hostname)
+			deleteNode(bc, kc, hostname)
 		})
 
 		Measure("It should be able to allocate a single address quickly - blocksize 32", func(b Benchmarker) {
@@ -229,8 +239,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 				bc.Clean()
 				deleteAllPools()
 
-				applyNode(bc, hostA, nil)
-				applyNode(bc, hostB, nil)
+				applyNode(bc, kc, hostA, nil)
+				applyNode(bc, kc, hostB, nil)
 				applyPool("10.0.0.0/24", true, "")
 
 				args := AutoAssignArgs{
@@ -298,9 +308,13 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 
 	Describe("IPAM handle tests", func() {
 		It("should support querying and releasing an IP address by handle", func() {
+			By("creating a node", func() {
+				applyNode(bc, kc, "test-host", nil)
+			})
+
 			By("setting up an IP pool", func() {
 				deleteAllPools()
-				applyPool("10.0.0.0/24", true)
+				applyPool("10.0.0.0/24", true, "")
 			})
 
 			handle := "test-handle"
@@ -346,11 +360,11 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 		}
 
 		BeforeEach(func() {
-			applyNode(bc, args.Hostname, nil)
+			applyNode(bc, kc, args.Hostname, nil)
 		})
 
 		AfterEach(func() {
-			deleteNode(bc, args.Hostname)
+			deleteNode(bc, kc, args.Hostname)
 		})
 
 		// Call once in order to assign an IP address and create a block.
@@ -383,7 +397,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, nil)
+			applyNode(bc, kc, host, nil)
 			applyPool("10.0.0.0/24", true, "")
 			applyPool("20.0.0.0/24", true, "")
 
@@ -490,7 +504,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, host, map[string]string{"foo": "bar"})
 			applyPool(pool1.String(), true, `foo == "bar"`)
 			applyPool(pool2.String(), true, `foo != "bar"`)
 
@@ -520,7 +534,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, host, map[string]string{"foo": "bar"})
 			applyPool(pool1.String(), true, `foo == "bar"`)
 
 			// Assign three addresses to the node.
@@ -588,7 +602,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, host, map[string]string{"foo": "bar"})
 			applyPool(pool1.String(), true, `foo == "bar"`)
 
 			handleID1 := "handle1"
@@ -677,8 +691,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, node1, map[string]string{"foo": "bar"})
-			applyNode(bc, node2, nil)
+			applyNode(bc, kc, node1, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, node2, nil)
 			applyPoolWithBlockSize(pool1.String(), true, `foo == "bar"`, 30)
 
 			// Assign 3 of the 4 total addresses to node1.
@@ -695,8 +709,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			Expect(len(blocks)).To(Equal(1))
 
 			// Switch labels so that ip pool selects node2.
-			applyNode(bc, node1, nil)
-			applyNode(bc, node2, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, node1, nil)
+			applyNode(bc, kc, node2, map[string]string{"foo": "bar"})
 
 			// Assign 1 address to node1, expect an error.
 			v4, _, err = ic.AutoAssign(context.Background(), AutoAssignArgs{
@@ -736,7 +750,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, host, map[string]string{"foo": "bar"})
 			applyPool(pool1.String(), true, `foo == "bar"`)
 
 			// Assign three addresses to the node.
@@ -818,7 +832,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, map[string]string{"foo": "bar"})
+			applyNode(bc, kc, host, map[string]string{"foo": "bar"})
 			applyPool(pool1.String(), true, `foo == "bar"`)
 
 			// Assign three addresses to the node.
@@ -897,7 +911,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 			bc.Clean()
 			deleteAllPools()
 
-			applyNode(bc, host, nil)
+			applyNode(bc, kc, host, nil)
 			applyPool(pool1.String(), true, "")
 			applyPool(pool2.String(), true, "")
 			applyPool(pool3.String(), false, "")
@@ -983,8 +997,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 				bc.Clean()
 				deleteAllPools()
 			}
-			applyNode(bc, host, nil)
-			defer deleteNode(bc, host)
+			applyNode(bc, kc, host, nil)
+			defer deleteNode(bc, kc, host)
 
 			for _, v := range pools {
 				ipPools.pools[v.cidr] = pool{cidr: v.cidr, enabled: v.enabled, blockSize: v.blockSize}
@@ -1010,40 +1024,40 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 		},
 
 		// Test 1a: AutoAssign 1 IPv4, 1 IPv6 with tiny block - expect one of each to be returned.
-		Entry("1 v4 1 v6 - tiny block", "testHost", true, []pool{{"192.168.1.0/24", 32, true, ""}, {"fd80:24e2:f998:72d6::/120", 128, true, ""}}, "192.168.1.0/24", 1, 1, 1, 1, 0, nil),
+		Entry("1 v4 1 v6 - tiny block", "test-host", true, []pool{{"192.168.1.0/24", 32, true, ""}, {"fd80:24e2:f998:72d6::/120", 128, true, ""}}, "192.168.1.0/24", 1, 1, 1, 1, 0, nil),
 
 		// Test 1b: AutoAssign 1 IPv4, 1 IPv6 with massive block - expect one of each to be returned.
-		Entry("1 v4 1 v6 - big block", "testHost", true, []pool{{"192.168.0.0/16", 20, true, ""}, {"fd80:24e2:f998:72d6::/110", 116, true, ""}}, "192.168.0.0/16", 1, 1, 1, 1, 0, nil),
+		Entry("1 v4 1 v6 - big block", "test-host", true, []pool{{"192.168.0.0/16", 20, true, ""}, {"fd80:24e2:f998:72d6::/110", 116, true, ""}}, "192.168.0.0/16", 1, 1, 1, 1, 0, nil),
 
 		// Test 1c: AutoAssign 1 IPv4, 1 IPv6 with default block - expect one of each to be returned.
-		Entry("1 v4 1 v6 - default block", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 1, 1, 1, 1, 0, nil),
+		Entry("1 v4 1 v6 - default block", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 1, 1, 1, 1, 0, nil),
 
 		// Test 2a: AutoAssign 256 IPv4, 256 IPv6 with default blocksize- expect 256 IPv4 + IPv6 addresses.
-		Entry("256 v4 256 v6", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 256, 256, 256, 0, nil),
+		Entry("256 v4 256 v6", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 256, 256, 256, 0, nil),
 
 		// Test 2b: AutoAssign 256 IPv4, 256 IPv6 with small blocksize- expect 256 IPv4 + IPv6 addresses.
-		Entry("256 v4 256 v6 - small blocks", "testHost", true, []pool{{"192.168.1.0/24", 30, true, ""}, {"fd80:24e2:f998:72d6::/120", 126, true, ""}}, "192.168.1.0/24", 256, 256, 256, 256, 0, nil),
+		Entry("256 v4 256 v6 - small blocks", "test-host", true, []pool{{"192.168.1.0/24", 30, true, ""}, {"fd80:24e2:f998:72d6::/120", 126, true, ""}}, "192.168.1.0/24", 256, 256, 256, 256, 0, nil),
 
 		// Test 2a: AutoAssign 256 IPv4, 256 IPv6 with num blocks limit expect 64 IPv4 + IPv6 addresses.
-		Entry("256 v4 0 v6 block limit", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 0, 64, 0, 1, ErrBlockLimit),
-		Entry("256 v4 0 v6 block limit 2", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 0, 128, 0, 2, ErrBlockLimit),
-		Entry("0 v4 256 v6 block limit", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 0, 256, 0, 64, 1, ErrBlockLimit),
+		Entry("256 v4 0 v6 block limit", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 0, 64, 0, 1, ErrBlockLimit),
+		Entry("256 v4 0 v6 block limit 2", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 256, 0, 128, 0, 2, ErrBlockLimit),
+		Entry("0 v4 256 v6 block limit", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 0, 256, 0, 64, 1, ErrBlockLimit),
 
 		// Test 3: AutoAssign 257 IPv4, 0 IPv6 - expect 256 IPv4 addresses, no IPv6, and no error.
-		Entry("257 v4 0 v6", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 257, 0, 256, 0, 0, nil),
+		Entry("257 v4 0 v6", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 257, 0, 256, 0, 0, nil),
 
 		// Test 4: AutoAssign 0 IPv4, 257 IPv6 - expect 256 IPv6 addresses, no IPv6, and no error.
-		Entry("0 v4 257 v6", "testHost", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 0, 257, 0, 256, 0, nil),
+		Entry("0 v4 257 v6", "test-host", true, []pool{{"192.168.1.0/24", 26, true, ""}, {"fd80:24e2:f998:72d6::/120", 122, true, ""}}, "192.168.1.0/24", 0, 257, 0, 256, 0, nil),
 
 		// Test 5: (use pool of size /25 so only two blocks are contained):
 		// - Assign 1 address on host A (Expect 1 address).
-		Entry("1 v4 0 v6 host-A", "host-A", true, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 1, 0, 1, 0, 0, nil),
+		Entry("1 v4 0 v6 host-a", "host-a", true, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 1, 0, 1, 0, 0, nil),
 
 		// - Assign 1 address on host B (Expect 1 address, different block).
-		Entry("1 v4 0 v6 host-B", "host-B", false, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 1, 0, 1, 0, 0, nil),
+		Entry("1 v4 0 v6 host-b", "host-b", false, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 1, 0, 1, 0, 0, nil),
 
 		// - Assign 64 more addresses on host A (Expect 63 addresses from host A's block, 1 address from host B's block).
-		Entry("64 v4 0 v6 host-A", "host-A", false, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 64, 0, 64, 0, 0, nil),
+		Entry("64 v4 0 v6 host-a", "host-a", false, []pool{{"10.0.0.0/25", 26, true, ""}, {"fd80:24e2:f998:72d6::/121", 122, true, ""}}, "10.0.0.0/25", 64, 0, 64, 0, 0, nil),
 	)
 
 	DescribeTable("AssignIP: requested IP vs returned error",
@@ -1057,8 +1071,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 				deleteAllPools()
 			}
 
-			applyNode(bc, host, nil)
-			defer deleteNode(bc, host)
+			applyNode(bc, kc, host, nil)
+			defer deleteNode(bc, kc, host)
 
 			for _, v := range pool {
 				applyPool(v, true, "")
@@ -1101,8 +1115,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 				deleteAllPools()
 			}
 
-			applyNode(bc, hostname, nil)
-			defer deleteNode(bc, hostname)
+			applyNode(bc, kc, hostname, nil)
+			defer deleteNode(bc, kc, hostname)
 
 			for _, v := range pool {
 				applyPool(v, true, "")
@@ -1185,8 +1199,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 				deleteAllPools()
 			}
 
-			applyNode(bc, args.host, nil)
-			defer deleteNode(bc, args.host)
+			applyNode(bc, kc, args.host, nil)
+			defer deleteNode(bc, kc, args.host)
 
 			for _, v := range args.pool {
 				applyPool(v, true, "")
@@ -1344,18 +1358,36 @@ func applyPoolWithBlockSize(cidr string, enabled bool, nodeSelector string, bloc
 	ipPools.pools[cidr] = pool{enabled: enabled, nodeSelector: nodeSelector, blockSize: blockSize}
 }
 
-func applyNode(c bapi.Client, host string, labels map[string]string) {
-	c.Apply(context.Background(), &model.KVPair{
-		Key: model.ResourceKey{Name: host, Kind: v3.KindNode},
-		Value: v3.Node{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec: v3.NodeSpec{OrchRefs: []v3.OrchRef{
-				v3.OrchRef{Orchestrator: "k8s", NodeName: host},
-			}},
-		},
-	})
+func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[string]string) {
+	if kc != nil {
+		// If a k8s clientset was provided, create the node in Kubernetes.
+		n := corev1.Node{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "Node",
+				APIVersion: "v1",
+			},
+		}
+		n.Name = host
+		n.Labels = labels
+		kc.CoreV1().Nodes().Create(&n)
+	} else {
+		// Otherwise, create it in Calico.
+		c.Apply(context.Background(), &model.KVPair{
+			Key: model.ResourceKey{Name: host, Kind: v3.KindNode},
+			Value: v3.Node{
+				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				Spec: v3.NodeSpec{OrchRefs: []v3.OrchRef{
+					v3.OrchRef{Orchestrator: "k8s", NodeName: host},
+				}},
+			},
+		})
+	}
 }
 
-func deleteNode(c bapi.Client, host string) {
-	c.Delete(context.Background(), &model.ResourceKey{Name: host, Kind: v3.KindNode}, "")
+func deleteNode(c bapi.Client, kc *kubernetes.Clientset, host string) {
+	if kc != nil {
+		kc.CoreV1().Nodes().Delete(host, &metav1.DeleteOptions{})
+	} else {
+		c.Delete(context.Background(), &model.ResourceKey{Name: host, Kind: v3.KindNode}, "")
+	}
 }

@@ -139,7 +139,6 @@ items:
       plural: globalnetworksets
       singular: globalnetworkset
 - apiVersion: apiextensions.k8s.io/v1beta1
-  description: Calico IPAM Blocks
   kind: CustomResourceDefinition
   metadata:
     name: ipamblocks.crd.projectcalico.org
@@ -152,7 +151,6 @@ items:
       plural: ipamblocks
       singular: ipamblock
 - apiVersion: apiextensions.k8s.io/v1beta1
-  description: Calico IPAM Block Affinities
   kind: CustomResourceDefinition
   metadata:
     name: blockaffinities.crd.projectcalico.org
@@ -165,7 +163,6 @@ items:
       plural: blockaffinities
       singular: blockaffinity
 - apiVersion: apiextensions.k8s.io/v1beta1
-  description: Calico IPAM Handles
   kind: CustomResourceDefinition
   metadata:
     name: ipamhandles.crd.projectcalico.org

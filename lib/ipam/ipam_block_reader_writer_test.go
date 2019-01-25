@@ -21,12 +21,14 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"k8s.io/client-go/kubernetes"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/projectcalico/libcalico-go/lib/apiconfig"
 	"github.com/projectcalico/libcalico-go/lib/backend"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
+	"github.com/projectcalico/libcalico-go/lib/backend/k8s"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 	cnet "github.com/projectcalico/libcalico-go/lib/net"
@@ -140,6 +142,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			pools        *ipPoolAccessor
 			rw           blockReaderWriter
 			ic           *ipamClient
+			kc           *kubernetes.Clientset
 		)
 
 		BeforeEach(func() {
@@ -150,10 +153,15 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			Expect(err).NotTo(HaveOccurred())
 			bc.Clean()
 
+			// If running in KDD mode, extract the k8s clientset.
+			if config.Spec.DatastoreType == "kubernetes" {
+				kc = bc.(*k8s.KubeClient).ClientSet
+			}
+
 			hostA = "hostA"
 			hostB = "hostB"
-			applyNode(bc, hostA, nil)
-			applyNode(bc, hostB, nil)
+			applyNode(bc, kc, hostA, nil)
+			applyNode(bc, kc, hostB, nil)
 
 			pools = &ipPoolAccessor{pools: map[string]pool{"10.0.0.0/26": {enabled: true}}}
 
@@ -186,8 +194,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 						defer GinkgoRecover()
 
 						testhost := fmt.Sprintf("host-%d", j)
-						applyNode(bc, testhost, nil)
-						defer deleteNode(bc, testhost)
+						applyNode(bc, kc, testhost, nil)
+						defer deleteNode(bc, kc, testhost)
 
 						ips, err := ic.autoAssign(ctx, 1, &testhost, nil, nil, 4, testhost, 0)
 						if err != nil {
@@ -270,7 +278,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				var testErr error
 
 				testhost := "single-host"
-				applyNode(bc, testhost, nil)
+				applyNode(bc, kc, testhost, nil)
 				for i := 0; i < 4; i++ {
 					wg.Add(1)
 					go func() {

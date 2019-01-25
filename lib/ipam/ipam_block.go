@@ -193,7 +193,7 @@ func (b *allocationBlock) release(addresses []cnet.IP) ([]cnet.IP, map[string]in
 		log.Debugf("Looking up attribute with index %d", *attrIdx)
 		handleID := b.Attributes[*attrIdx].AttrPrimary
 		if handleID != nil {
-			log.Debugf("HandleID is %s", handleID)
+			log.Debugf("HandleID is %s", *handleID)
 			handleCount := 0
 			if count, ok := countByHandle[*handleID]; !ok {
 				handleCount = count
