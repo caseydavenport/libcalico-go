@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 	log "github.com/sirupsen/logrus"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/projectcalico/libcalico-go/lib/apiconfig"
@@ -1377,7 +1378,16 @@ func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[
 		}
 		n.Name = host
 		n.Labels = labels
-		kc.CoreV1().Nodes().Create(&n)
+
+		// Create/Update the node
+		newNode, err := kc.CoreV1().Nodes().Create(&n)
+		if err != nil && kerrors.IsAlreadyExists(err) {
+			oldNode, _ := kc.CoreV1().Nodes().Get(host, metav1.GetOptions{})
+			oldNode.Labels = labels
+
+			newNode, _ = kc.CoreV1().Nodes().Update(oldNode)
+		}
+		log.WithField("node", newNode).WithError(err).Info("node applied")
 	} else {
 		// Otherwise, create it in Calico.
 		c.Apply(context.Background(), &model.KVPair{
