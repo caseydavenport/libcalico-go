@@ -111,6 +111,8 @@ func NewKubeClient(ca *apiconfig.CalicoAPIConfigSpec) (api.Client, error) {
 	}
 
 	// Create the clientset
+	config.QPS = float32(500)
+	config.Burst = 500
 	cs, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, resources.K8sErrorToCalico(err, nil)
