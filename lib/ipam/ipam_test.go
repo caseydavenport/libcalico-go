@@ -105,7 +105,7 @@ type testArgsClaimAff struct {
 	expError                    error
 }
 
-var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, func(config apiconfig.CalicoAPIConfig) {
+var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreAll, func(config apiconfig.CalicoAPIConfig) {
 	// Create a new backend client and an IPAM Client using the IP Pools Accessor.
 	// Tests that need to ensure a clean datastore should invoke Clean() on the datastore at the start of the
 	// tests.
@@ -125,29 +125,37 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreK8s, fun
 	})
 
 	Context("Measuring allocation performance", func() {
-		hostname := "host-perf"
-
+		var pa *ipPoolAccessor
+		var hostname string
 		var pool20, pool32, pool26 []cnet.IPNet
-		// Create many pools
-		for i := 0; i < 100; i++ {
-			cidr := fmt.Sprintf("10.%d.0.0/16", i)
-			ipPools.pools[cidr] = pool{enabled: true, blockSize: 26}
-			pool26 = append(pool26, cnet.MustParseCIDR(cidr))
-		}
-
-		for i := 0; i < 100; i++ {
-			cidr := fmt.Sprintf("11.%d.0.0/16", i)
-			ipPools.pools[cidr] = pool{enabled: true, blockSize: 32}
-			pool32 = append(pool32, cnet.MustParseCIDR(cidr))
-		}
-
-		for i := 0; i < 50; i++ {
-			cidr := fmt.Sprintf("12.%d.0.0/16", i)
-			ipPools.pools[cidr] = pool{enabled: true, blockSize: 20}
-			pool20 = append(pool20, cnet.MustParseCIDR(cidr))
-		}
 
 		BeforeEach(func() {
+			// Build a new pool accessor for these tests.
+			pa = &ipPoolAccessor{pools: map[string]pool{}}
+			ic = NewIPAMClient(bc, pa)
+
+			hostname = "host-perf"
+
+			// Create many pools
+			for i := 0; i < 100; i++ {
+				cidr := fmt.Sprintf("10.%d.0.0/16", i)
+				pa.pools[cidr] = pool{enabled: true, blockSize: 26}
+				pool26 = append(pool26, cnet.MustParseCIDR(cidr))
+			}
+
+			for i := 0; i < 100; i++ {
+				cidr := fmt.Sprintf("11.%d.0.0/16", i)
+				pa.pools[cidr] = pool{enabled: true, blockSize: 32}
+				pool32 = append(pool32, cnet.MustParseCIDR(cidr))
+			}
+
+			for i := 0; i < 50; i++ {
+				cidr := fmt.Sprintf("12.%d.0.0/16", i)
+				pa.pools[cidr] = pool{enabled: true, blockSize: 20}
+				pool20 = append(pool20, cnet.MustParseCIDR(cidr))
+			}
+
+			// Create the node object.
 			applyNode(bc, kc, hostname, map[string]string{"foo": "bar"})
 		})
 

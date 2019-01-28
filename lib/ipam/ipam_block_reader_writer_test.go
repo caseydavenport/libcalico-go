@@ -127,7 +127,7 @@ func (c *fakeClient) Watch(ctx context.Context, list model.ListInterface, revisi
 	return nil, nil
 }
 
-var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", testutils.DatastoreEtcdV3, func(config apiconfig.CalicoAPIConfig) {
+var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", testutils.DatastoreAll, func(config apiconfig.CalicoAPIConfig) {
 
 	log.SetLevel(log.DebugLevel)
 
@@ -158,8 +158,8 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				kc = bc.(*k8s.KubeClient).ClientSet
 			}
 
-			hostA = "hostA"
-			hostB = "hostB"
+			hostA = "host-a"
+			hostB = "host-b"
 			applyNode(bc, kc, hostA, nil)
 			applyNode(bc, kc, hostB, nil)
 
@@ -446,9 +446,13 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				// it actually simulates the other process marking the affinity as pending delete
 				// and deletes the block.
 				fc.createFuncs[fmt.Sprintf("%s", blockKVP.Key)] = func(ctx context.Context, object *model.KVPair) (*model.KVPair, error) {
-					// Mark the affinity pending deletion.
-					affinityKVP.Value.(*model.BlockAffinity).State = model.StatePendingDeletion
-					_, err := bc.Apply(ctx, &affinityKVP)
+					// Mark the affinity pending deletion. Query the affinity and update it.
+					a, err := bc.Get(ctx, affinityKVP.Key, "")
+					if err != nil {
+						panic(err)
+					}
+					a.Value.(*model.BlockAffinity).State = model.StatePendingDeletion
+					_, err = bc.Update(ctx, a)
 					if err != nil {
 						panic(err)
 					}
@@ -510,7 +514,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				b := newBlock(*net)
 				blockKVP = model.KVPair{
 					Key:   model.BlockKey{CIDR: *net},
-					Value: &b,
+					Value: b.AllocationBlock,
 				}
 				affinityKVP = model.KVPair{
 					Key:   model.BlockAffinityKey{Host: hostA, CIDR: *net},
@@ -523,17 +527,29 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 				// it actually simulates the other process marking the affinity as pending
 				// and creating the block.
 				fc.deleteFuncs[fmt.Sprintf("%s", blockKVP.Key)] = func(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
-					// Mark the affinity pending.
-					affinityKVP.Value.(*model.BlockAffinity).State = model.StatePending
-					_, err := bc.Apply(ctx, &affinityKVP)
+					// Delete the block, but then immediately create it again below to simulate another process claiming
+					// the block.
+					kvp, err := bc.Delete(ctx, key, revision)
+
+					// Mark the affinity pending. Query the affinity and update it.
+					a, err := bc.Get(ctx, affinityKVP.Key, "")
 					if err != nil {
 						panic(err)
 					}
 
-					// Delete the block, but then immediately create it again to simulate another process claiming
-					// the block.
-					kvp, err := bc.Delete(ctx, key, revision)
-					bc.Create(ctx, kvp)
+					a.Value.(*model.BlockAffinity).State = model.StatePending
+					_, err = bc.Update(ctx, a)
+					if err != nil {
+						panic(err)
+					}
+
+					// We don't want to return an error on create, just panic.
+					// We'll return the delete from error if there as one.
+					kvp.Revision = ""
+					_, nerr := bc.Create(ctx, kvp)
+					if nerr != nil {
+						panic(nerr)
+					}
 					return kvp, err
 				}
 
@@ -580,11 +596,11 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests", tes
 			// Creation function for a block affinity - actually create it.
 			affKVP := &model.KVPair{
 				Key:   model.BlockAffinityKey{Host: hostA, CIDR: *net},
-				Value: model.BlockAffinity{},
+				Value: &model.BlockAffinity{},
 			}
 			affKVP2 := &model.KVPair{
 				Key:   model.BlockAffinityKey{Host: hostB, CIDR: *net},
-				Value: model.BlockAffinity{State: model.StateConfirmed},
+				Value: &model.BlockAffinity{State: model.StateConfirmed},
 			}
 
 			fc.createFuncs[fmt.Sprintf("%s", affKVP.Key)] = func(ctx context.Context, object *model.KVPair) (*model.KVPair, error) {

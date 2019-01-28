@@ -1039,6 +1039,11 @@ func (c ipamClient) RemoveIPAMHost(ctx context.Context, host string) error {
 		k := model.IPAMHostKey{Host: hostname}
 		kvp, err := c.client.Get(ctx, k, "")
 		if err != nil {
+			if _, ok := err.(cerrors.ErrorOperationNotSupported); ok {
+				// KDD mode doesn't have this object - this is a no-op.
+				logCtx.Debugf("No need to remove IPAM host for this datastore")
+				return nil
+			}
 			if _, ok := err.(cerrors.ErrorResourceDoesNotExist); !ok {
 				logCtx.WithError(err).Errorf("Failed to get IPAM host")
 				return err
