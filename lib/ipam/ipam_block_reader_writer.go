@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2016-2019 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -109,7 +109,7 @@ func (rw blockReaderWriter) findUnclaimedBlock(ctx context.Context, host string,
 			// Check if a block already exists for this subnet.
 			log.Debugf("Getting block: %s", subnet.String())
 			key := model.BlockKey{CIDR: *subnet}
-			_, err := rw.client.Get(ctx, key, "")
+			_, err := rw.queryBlock(ctx, key, "")
 			if err != nil {
 				if _, ok := err.(cerrors.ErrorResourceDoesNotExist); ok {
 					log.Infof("Found free block: %+v", *subnet)
@@ -187,7 +187,7 @@ func (rw blockReaderWriter) claimAffineBlock(ctx context.Context, aff *model.KVP
 		if _, ok := err.(cerrors.ErrorResourceAlreadyExists); ok {
 			// Block already exists, check affinity.
 			logCtx.Info("The block already exists, getting it from data store")
-			obj, err := rw.client.Get(ctx, model.BlockKey{CIDR: subnet}, "")
+			obj, err := rw.queryBlock(ctx, model.BlockKey{CIDR: subnet}, "")
 			if err != nil {
 				// We failed to create the block, but the affinity still exists. We don't know
 				// if someone else beat us to the block since we can't get it.
@@ -273,7 +273,7 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 	// Read the model.KVPair containing the block
 	// and pull out the allocationBlock object.  We need to hold on to this
 	// so that we can pass it back to the datastore on Update.
-	obj, err := rw.client.Get(ctx, model.BlockKey{CIDR: blockCIDR}, "")
+	obj, err := rw.queryBlock(ctx, model.BlockKey{CIDR: blockCIDR}, "")
 	if err != nil {
 		logCtx.WithError(err).Warnf("Error getting block")
 		return err
@@ -358,15 +358,11 @@ func (rw blockReaderWriter) queryAffinity(ctx context.Context, k model.Key, revi
 
 	// If the affinity is marked as deleted, we need to delete it.
 	if err := rw.deleteAffinity(ctx, aff); err != nil {
-		if _, ok := err.(cerrors.ErrorResourceDoesNotExist); ok {
-			// Already deleted - we're good.
-			return nil, nil
-		}
 		return nil, err
 	}
 
 	// Should return a "does not exist" error.
-	return rw.client.Get(ctx, k, revision)
+	return nil, cerrors.ErrorResourceDoesNotExist{fmt.Errorf("Resource was deleted"), k}
 }
 
 func (rw blockReaderWriter) updateAffinity(ctx context.Context, aff *model.KVPair) (*model.KVPair, error) {
@@ -387,6 +383,25 @@ func (rw blockReaderWriter) deleteAffinity(ctx context.Context, aff *model.KVPai
 		return err
 	}
 	return nil
+}
+
+func (rw blockReaderWriter) queryBlock(ctx context.Context, k model.Key, revision string) (*model.KVPair, error) {
+	kvp, err := rw.client.Get(ctx, k, revision)
+	if err != nil {
+		return nil, err
+	}
+
+	if !kvp.Value.(*model.AllocationBlock).Deleting {
+		// Not deleting - we can just return.
+		return kvp, nil
+	}
+
+	// The block is marked as deleting. Delete it.
+	if err := rw.deleteBlock(ctx, kvp); err != nil {
+		return nil, err
+	}
+
+	return nil, cerrors.ErrorResourceDoesNotExist{fmt.Errorf("Resource was deleted"), k}
 }
 
 func (rw blockReaderWriter) updateBlock(ctx context.Context, b *model.KVPair) (*model.KVPair, error) {

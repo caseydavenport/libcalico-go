@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -62,11 +62,11 @@ type ipamBlockClient struct {
 	rc customK8sResourceClient
 }
 
-func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
+func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
 	cidrStr := kvpv3.Value.(*apiv3.IPAMBlock).Annotations["projectcalico.org/cidr"]
 	_, cidr, err := net.ParseCIDR(cidrStr)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	ab := kvpv3.Value.(*apiv3.IPAMBlock)
@@ -106,7 +106,7 @@ func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
 			Deleting:       ab.Spec.Deleting,
 		},
 		Revision: kvpv3.Revision,
-	}
+	}, nil
 }
 
 func (c ipamBlockClient) v3Fields(k model.Key) (name, cidr string) {
@@ -178,7 +178,11 @@ func (c *ipamBlockClient) Create(ctx context.Context, kvp *model.KVPair) (*model
 	if err != nil {
 		return nil, err
 	}
-	return c.toV1(b), nil
+	v1nkvp, err := c.toV1(b)
+	if err != nil {
+		return nil, err
+	}
+	return v1nkvp, nil
 }
 
 func (c *ipamBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model.KVPair, error) {
@@ -187,7 +191,11 @@ func (c *ipamBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model
 	if err != nil {
 		return nil, err
 	}
-	return c.toV1(b), nil
+	v1nkvp, err := c.toV1(b)
+	if err != nil {
+		return nil, err
+	}
+	return v1nkvp, nil
 }
 
 func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
@@ -200,7 +208,11 @@ func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision st
 	if err != nil {
 		return nil, err
 	}
-	return c.toV1(kvp), nil
+	v1nkvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1nkvp, nil
 }
 
 func (c *ipamBlockClient) Get(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
@@ -213,7 +225,11 @@ func (c *ipamBlockClient) Get(ctx context.Context, key model.Key, revision strin
 	if err != nil {
 		return nil, err
 	}
-	return c.toV1(kvp), nil
+	v1nkvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1nkvp, nil
 }
 
 func (c *ipamBlockClient) List(ctx context.Context, list model.ListInterface, revision string) (*model.KVPairList, error) {
@@ -225,7 +241,10 @@ func (c *ipamBlockClient) List(ctx context.Context, list model.ListInterface, re
 
 	kvpl := &model.KVPairList{KVPairs: []*model.KVPair{}}
 	for _, i := range v3list.KVPairs {
-		v1kvp := c.toV1(i)
+		v1kvp, err := c.toV1(i)
+		if err != nil {
+			return nil, err
+		}
 		kvpl.KVPairs = append(kvpl.KVPairs, v1kvp)
 	}
 	return kvpl, nil
