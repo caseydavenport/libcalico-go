@@ -21,6 +21,7 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 	log "github.com/sirupsen/logrus"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -55,7 +56,7 @@ func (c *ipamConfigClient) Update(ctx context.Context, kvp *model.KVPair) (*mode
 	}
 }
 
-func (c *ipamConfigClient) Delete(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
+func (c *ipamConfigClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
 	log.Warn("Operation Delete is not supported on AffinityBlock type")
 	return nil, cerrors.ErrorOperationNotSupported{
 		Identifier: key,

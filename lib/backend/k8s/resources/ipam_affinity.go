@@ -28,6 +28,7 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/net"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -74,6 +75,7 @@ func toV1(kvpv3 *model.KVPair) *model.KVPair {
 		Key: model.BlockAffinityKey{
 			Host: host,
 			CIDR: *cidr,
+			UID:  &kvpv3.Value.(*apiv3.BlockAffinity).UID,
 		},
 		Value: &model.BlockAffinity{
 			State: state,
@@ -122,6 +124,7 @@ func toV3(kvpv1 *model.KVPair) *model.KVPair {
 
 func (c *affinityBlockClient) Create(ctx context.Context, kvp *model.KVPair) (*model.KVPair, error) {
 	nkvp := toV3(kvp)
+	//nkvp.Value.(Resource).GetObjectMeta().SetFinalizers([]string{"ipam.projectcalico.org"})
 	kvp, err := c.rc.Create(ctx, nkvp)
 	if err != nil {
 		return nil, err
@@ -131,6 +134,7 @@ func (c *affinityBlockClient) Create(ctx context.Context, kvp *model.KVPair) (*m
 
 func (c *affinityBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model.KVPair, error) {
 	nkvp := toV3(kvp)
+	//nkvp.Value.(Resource).GetObjectMeta().SetFinalizers([]string{"ipam.projectcalico.org"})
 	kvp, err := c.rc.Update(ctx, nkvp)
 	if err != nil {
 		return nil, err
@@ -138,13 +142,13 @@ func (c *affinityBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*m
 	return toV1(kvp), nil
 }
 
-func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
+func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
 	name, _, _ := v3Fields(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindBlockAffinity,
 	}
-	kvp, err := c.rc.Delete(ctx, k, revision)
+	kvp, err := c.rc.Delete(ctx, k, revision, key.(model.BlockAffinityKey).UID)
 	if err != nil {
 		return nil, err
 	}

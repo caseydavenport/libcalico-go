@@ -25,6 +25,7 @@ import (
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -123,13 +124,13 @@ func (c *ipamHandleClient) Update(ctx context.Context, kvp *model.KVPair) (*mode
 	return c.toV1(kvp), nil
 }
 
-func (c *ipamHandleClient) Delete(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
+func (c *ipamHandleClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
 	name := c.v3Fields(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindIPAMHandle,
 	}
-	kvp, err := c.rc.Delete(ctx, k, revision)
+	kvp, err := c.rc.Delete(ctx, k, revision, uid)
 	if err != nil {
 		return nil, err
 	}

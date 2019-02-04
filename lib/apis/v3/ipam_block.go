@@ -44,6 +44,7 @@ type IPAMBlockSpec struct {
 	Allocations    []int                 `json:"allocations"`
 	Unallocated    []int                 `json:"unallocated"`
 	Attributes     []AllocationAttribute `json:"attributes"`
+	Deleting       bool                  `json:"deleting"`
 
 	// HostAffinity is deprecated in favor of Affinity.
 	// This is only to keep compatiblity with existing deployments.

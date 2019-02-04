@@ -142,7 +142,7 @@ func (rw blockReaderWriter) getPendingAffinity(ctx context.Context, host string,
 		logCtx.Info("Block affinity already exists, getting existing affinity")
 
 		// Get the existing affinity.
-		aff, err = rw.client.Get(ctx, obj.Key, "")
+		aff, err = rw.queryAffinity(ctx, obj.Key, "")
 		if err != nil {
 			logCtx.WithError(err).Error("Failed to get existing affinity")
 			return nil, err
@@ -153,7 +153,7 @@ func (rw blockReaderWriter) getPendingAffinity(ctx context.Context, host string,
 		if aff.Value.(*model.BlockAffinity).State != model.StateConfirmed {
 			logCtx.Infof("Marking existing affinity with current state %s as pending", aff.Value.(*model.BlockAffinity).State)
 			aff.Value.(*model.BlockAffinity).State = model.StatePending
-			return rw.client.Update(ctx, aff)
+			return rw.updateAffinity(ctx, aff)
 		}
 		logCtx.Info("Existing affinity is already confirmed")
 		return aff, nil
@@ -178,7 +178,7 @@ func (rw blockReaderWriter) claimAffineBlock(ctx context.Context, aff *model.KVP
 
 	// Create the new block in the datastore.
 	o := model.KVPair{
-		Key:   model.BlockKey{block.CIDR},
+		Key:   model.BlockKey{CIDR: block.CIDR},
 		Value: block.AllocationBlock,
 	}
 	logCtx.Info("Attempting to create a new block")
@@ -187,7 +187,7 @@ func (rw blockReaderWriter) claimAffineBlock(ctx context.Context, aff *model.KVP
 		if _, ok := err.(cerrors.ErrorResourceAlreadyExists); ok {
 			// Block already exists, check affinity.
 			logCtx.Info("The block already exists, getting it from data store")
-			obj, err := rw.client.Get(ctx, model.BlockKey{subnet}, "")
+			obj, err := rw.client.Get(ctx, model.BlockKey{CIDR: subnet}, "")
 			if err != nil {
 				// We failed to create the block, but the affinity still exists. We don't know
 				// if someone else beat us to the block since we can't get it.
@@ -211,8 +211,7 @@ func (rw blockReaderWriter) claimAffineBlock(ctx context.Context, aff *model.KVP
 
 			// Some other host beat us to this block.  Cleanup and return an error.
 			log.Info("Block is owned by another host, delete our pending affinity")
-			_, err = rw.client.Delete(ctx, model.BlockAffinityKey{Host: host, CIDR: b.CIDR}, aff.Revision)
-			if err != nil {
+			if err = rw.deleteAffinity(ctx, aff); err != nil {
 				// Failed to clean up our claim to this block.
 				logCtx.WithError(err).Errorf("Error deleting block affinity")
 			}
@@ -236,11 +235,11 @@ func (rw blockReaderWriter) confirmAffinity(ctx context.Context, aff *model.KVPa
 	logCtx := log.WithFields(log.Fields{"host": host, "subnet": cidr})
 	logCtx.Info("Confirming affinity")
 	aff.Value.(*model.BlockAffinity).State = model.StateConfirmed
-	confirmed, err := rw.client.Update(ctx, aff)
+	confirmed, err := rw.updateAffinity(ctx, aff)
 	if err != nil {
 		// We couldn't confirm the block - check to see if it was confirmed by
 		// another process.
-		kvp, err2 := rw.client.Get(ctx, aff.Key, "")
+		kvp, err2 := rw.queryAffinity(ctx, aff.Key, "")
 		if err2 == nil && kvp.Value.(*model.BlockAffinity).State == model.StateConfirmed {
 			// Confirmed by someone else - we can use this.
 			logCtx.Info("Affinity is already confirmed")
@@ -265,7 +264,7 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 	// Read the model.KVPair containing the block affinity.
 	logCtx := log.WithFields(log.Fields{"host": host, "subnet": blockCIDR.String()})
 	logCtx.Debugf("Attempt to release affinity for block")
-	aff, err := rw.client.Get(ctx, model.BlockAffinityKey{Host: host, CIDR: blockCIDR}, "")
+	aff, err := rw.queryAffinity(ctx, model.BlockAffinityKey{Host: host, CIDR: blockCIDR}, "")
 	if err != nil {
 		logCtx.WithError(err).Errorf("Error getting block affinity %s", blockCIDR.String())
 		return err
@@ -300,7 +299,7 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 
 	// Mark the affinity as pending deletion.
 	aff.Value.(*model.BlockAffinity).State = model.StatePendingDeletion
-	aff, err = rw.client.Update(ctx, aff)
+	aff, err = rw.updateAffinity(ctx, aff)
 	if err != nil {
 		logCtx.WithError(err).Warnf("Failed to mark block affinity as pending deletion")
 		return err
@@ -309,7 +308,7 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 	if b.empty() {
 		// If the block is empty, we can delete it.
 		logCtx.Debug("Block is empty - delete it")
-		_, err := rw.client.Delete(ctx, model.BlockKey{CIDR: b.CIDR}, obj.Revision)
+		err := rw.deleteBlock(ctx, obj)
 		if err != nil {
 			if _, ok := err.(cerrors.ErrorResourceDoesNotExist); !ok {
 				logCtx.WithError(err).Error("Error deleting block")
@@ -328,7 +327,7 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 		// Pass back the original KVPair with the new
 		// block information so we can do a CAS.
 		obj.Value = b.AllocationBlock
-		_, err = rw.client.Update(ctx, obj)
+		_, err = rw.updateBlock(ctx, obj)
 		if err != nil {
 			logCtx.WithError(err).Error("Failed to remove affinity from block")
 			return err
@@ -336,13 +335,82 @@ func (rw blockReaderWriter) releaseBlockAffinity(ctx context.Context, host strin
 	}
 
 	// We've removed / updated the block, so perform a compare-and-delete on the BlockAffinity.
-	_, err = rw.client.Delete(ctx, model.BlockAffinityKey{Host: host, CIDR: b.CIDR}, aff.Revision)
-	if err != nil {
+	if err := rw.deleteAffinity(ctx, aff); err != nil {
 		// Return the error unless the affinity didn't exist.
 		if _, ok := err.(cerrors.ErrorResourceDoesNotExist); !ok {
 			logCtx.Errorf("Error deleting block affinity: %v", err)
 			return err
 		}
+	}
+	return nil
+}
+
+func (rw blockReaderWriter) queryAffinity(ctx context.Context, k model.Key, revision string) (*model.KVPair, error) {
+	aff, err := rw.client.Get(ctx, k, revision)
+	if err != nil {
+		return nil, err
+	}
+
+	if aff.Value.(*model.BlockAffinity).State != model.StateDeleted {
+		// We're all good - return the afifnity.
+		return aff, nil
+	}
+
+	// If the affinity is marked as deleted, we need to delete it.
+	if err := rw.deleteAffinity(ctx, aff); err != nil {
+		if _, ok := err.(cerrors.ErrorResourceDoesNotExist); ok {
+			// Already deleted - we're good.
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	// Should return a "does not exist" error.
+	return rw.client.Get(ctx, k, revision)
+}
+
+func (rw blockReaderWriter) updateAffinity(ctx context.Context, aff *model.KVPair) (*model.KVPair, error) {
+	return rw.client.Update(ctx, aff)
+}
+
+func (rw blockReaderWriter) deleteAffinity(ctx context.Context, aff *model.KVPair) error {
+	// Mark the affinity as block deleted.
+	aff.Value.(*model.BlockAffinity).State = model.StateDeleted
+	aff, err := rw.client.Update(ctx, aff)
+	if err != nil {
+		return err
+	}
+
+	// We've removed / updated the block, so perform a compare-and-delete on the BlockAffinity.
+	_, err = rw.client.Delete(ctx, aff.Key, aff.Revision)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (rw blockReaderWriter) updateBlock(ctx context.Context, b *model.KVPair) (*model.KVPair, error) {
+	if b.Value.(*model.AllocationBlock).Deleting {
+		// If the block is in the process of being deleted, we should return
+		// a conflict error and retry.
+		return nil, cerrors.ErrorResourceUpdateConflict{Err: fmt.Errorf("Resource being deleted"), Identifier: b.Key}
+	}
+
+	return rw.client.Update(ctx, b)
+}
+
+func (rw blockReaderWriter) deleteBlock(ctx context.Context, b *model.KVPair) error {
+	// First, write it as pending deletion.
+	b.Value.(*model.AllocationBlock).Deleting = true
+	_, err := rw.client.Update(ctx, b)
+	if err != nil {
+		return err
+	}
+
+	// Then, actually delete the block.
+	_, err = rw.client.Delete(ctx, b.Key, b.Revision)
+	if err != nil {
+		return err
 	}
 	return nil
 }

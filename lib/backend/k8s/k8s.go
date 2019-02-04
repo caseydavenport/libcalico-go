@@ -481,7 +481,7 @@ func (c *KubeClient) Delete(ctx context.Context, k model.Key, revision string) (
 			Operation:  "Delete",
 		}
 	}
-	return client.Delete(ctx, k, revision)
+	return client.Delete(ctx, k, revision, nil)
 }
 
 // Get an entry from the datastore.  This errors if the entry does not exist.

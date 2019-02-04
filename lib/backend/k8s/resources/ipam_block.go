@@ -27,6 +27,7 @@ import (
 	"github.com/projectcalico/libcalico-go/lib/net"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -93,6 +94,7 @@ func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
 	return &model.KVPair{
 		Key: model.BlockKey{
 			CIDR: *cidr,
+			UID:  &ab.UID,
 		},
 		Value: &model.AllocationBlock{
 			CIDR:           *cidr,
@@ -101,6 +103,7 @@ func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
 			Allocations:    allocations,
 			Unallocated:    ab.Spec.Unallocated,
 			Attributes:     attrs,
+			Deleting:       ab.Spec.Deleting,
 		},
 		Revision: kvpv3.Revision,
 	}
@@ -162,6 +165,7 @@ func (c ipamBlockClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
 				Affinity:       ab.Affinity,
 				StrictAffinity: ab.StrictAffinity,
 				Attributes:     attrs,
+				Deleting:       ab.Deleting,
 			},
 		},
 		Revision: kvpv1.Revision,
@@ -186,13 +190,13 @@ func (c *ipamBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model
 	return c.toV1(b), nil
 }
 
-func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
+func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
 	name, _ := c.v3Fields(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindIPAMBlock,
 	}
-	kvp, err := c.rc.Delete(ctx, k, revision)
+	kvp, err := c.rc.Delete(ctx, k, revision, key.(model.BlockKey).UID)
 	if err != nil {
 		return nil, err
 	}
