@@ -1137,11 +1137,6 @@ func (in *IPAMBlockSpec) DeepCopyInto(out *IPAMBlockSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.HostAffinity != nil {
-		in, out := &in.HostAffinity, &out.HostAffinity
-		*out = new(string)
-		**out = **in
-	}
 	return
 }
 
