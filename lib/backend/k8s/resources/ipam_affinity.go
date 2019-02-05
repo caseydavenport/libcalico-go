@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2017 Tigera, Inc. All rights reserved.
+// Copyright (c) 2019 Tigera, Inc. All rights reserved.
 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,12 +64,13 @@ type affinityBlockClient struct {
 	rc customK8sResourceClient
 }
 
-func toV1(kvpv3 *model.KVPair) *model.KVPair {
+func (c affinityBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
 	cidrStr := kvpv3.Value.(*apiv3.BlockAffinity).Annotations["projectcalico.org/cidr"]
 	host := kvpv3.Value.(*apiv3.BlockAffinity).Annotations["projectcalico.org/host"]
 	_, cidr, err := net.ParseCIDR(cidrStr)
 	if err != nil {
-		panic(err)
+		log.WithField("cidr", cidr).WithError(err).Error("failed to parse cidr")
+		return nil, err
 	}
 	state := model.BlockAffinityState(kvpv3.Value.(*apiv3.BlockAffinity).Spec.State)
 	return &model.KVPair{
@@ -82,13 +83,14 @@ func toV1(kvpv3 *model.KVPair) *model.KVPair {
 			State: state,
 		},
 		Revision: kvpv3.Revision,
-	}
+	}, nil
 }
 
-func v3Fields(k model.Key) (name, cidr, host string) {
+func (c affinityBlockClient) v3Fields(k model.Key) (name, cidr, host string) {
 	// Sanitize the CIDR, replacing characters which
 	// are not allowed in the Kubernetes API.
 	// e.g., 10.0.0.1/26 -> 10-0-0-1-26
+	host = k.(model.BlockAffinityKey).Host
 	cidr = fmt.Sprintf("%s", k.(model.BlockAffinityKey).CIDR)
 	cidrstr := strings.Replace(cidr, ".", "-", -1)
 	cidrstr = strings.Replace(cidrstr, ":", "-", -1)
@@ -115,8 +117,8 @@ func v3Fields(k model.Key) (name, cidr, host string) {
 	return
 }
 
-func toV3(kvpv1 *model.KVPair) *model.KVPair {
-	name, cidr, host := v3Fields(kvpv1.Key)
+func (c affinityBlockClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
+	name, cidr, host := c.v3Fields(kvpv1.Key)
 	state := kvpv1.Value.(*model.BlockAffinity).State
 	return &model.KVPair{
 		Key: model.ResourceKey{
@@ -145,27 +147,33 @@ func toV3(kvpv1 *model.KVPair) *model.KVPair {
 }
 
 func (c *affinityBlockClient) Create(ctx context.Context, kvp *model.KVPair) (*model.KVPair, error) {
-	nkvp := toV3(kvp)
-	//nkvp.Value.(Resource).GetObjectMeta().SetFinalizers([]string{"ipam.projectcalico.org"})
+	nkvp := c.toV3(kvp)
 	kvp, err := c.rc.Create(ctx, nkvp)
 	if err != nil {
 		return nil, err
 	}
-	return toV1(kvp), nil
+	v1kvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1kvp, nil
 }
 
 func (c *affinityBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model.KVPair, error) {
-	nkvp := toV3(kvp)
-	//nkvp.Value.(Resource).GetObjectMeta().SetFinalizers([]string{"ipam.projectcalico.org"})
+	nkvp := c.toV3(kvp)
 	kvp, err := c.rc.Update(ctx, nkvp)
 	if err != nil {
 		return nil, err
 	}
-	return toV1(kvp), nil
+	v1kvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1kvp, nil
 }
 
 func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
-	name, _, _ := v3Fields(key)
+	name, _, _ := c.v3Fields(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindBlockAffinity,
@@ -174,11 +182,15 @@ func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revisio
 	if err != nil {
 		return nil, err
 	}
-	return toV1(kvp), nil
+	v1kvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1kvp, nil
 }
 
 func (c *affinityBlockClient) Get(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
-	name, _, _ := v3Fields(key)
+	name, _, _ := c.v3Fields(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindBlockAffinity,
@@ -187,7 +199,11 @@ func (c *affinityBlockClient) Get(ctx context.Context, key model.Key, revision s
 	if err != nil {
 		return nil, err
 	}
-	return toV1(kvp), nil
+	v1kvp, err := c.toV1(kvp)
+	if err != nil {
+		return nil, err
+	}
+	return v1kvp, nil
 }
 
 func (c *affinityBlockClient) List(ctx context.Context, list model.ListInterface, revision string) (*model.KVPairList, error) {
@@ -202,7 +218,10 @@ func (c *affinityBlockClient) List(ctx context.Context, list model.ListInterface
 
 	kvpl := &model.KVPairList{KVPairs: []*model.KVPair{}}
 	for _, i := range v3list.KVPairs {
-		v1kvp := toV1(i)
+		v1kvp, err := c.toV1(i)
+		if err != nil {
+			return nil, err
+		}
 		if host == "" || v1kvp.Key.(model.BlockAffinityKey).Host == host {
 			cidr := v1kvp.Key.(model.BlockAffinityKey).CIDR
 			cidr2 := &cidr
