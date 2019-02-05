@@ -110,6 +110,9 @@ func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) *model.KVPair {
 }
 
 func (c ipamBlockClient) v3Fields(k model.Key) (name, cidr string) {
+	// Name is calculated using the CIDR, replacing characters which
+	// are not allowed in the Kubernetes API.
+	// e.g., 10.0.0.1/26 -> 10-0-0-1-26
 	cidr = fmt.Sprintf("%s", k.(model.BlockKey).CIDR)
 	name = strings.Replace(cidr, ".", "-", -1)
 	name = strings.Replace(name, ":", "-", -1)

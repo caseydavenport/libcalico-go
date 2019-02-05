@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strings"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
@@ -360,20 +361,83 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreAll, fun
 	})
 
 	Describe("IPAM AutoAssign from any pool", func() {
-		// Assign an IP address, don't pass a pool, make sure we can get an
-		// address.
-		args := AutoAssignArgs{
-			Num4:     1,
-			Num6:     0,
-			Hostname: "test-host",
-		}
+		var args AutoAssignArgs
+		var longHostname, longHostname2 string
 
 		BeforeEach(func() {
-			applyNode(bc, kc, args.Hostname, nil)
+			args = AutoAssignArgs{
+				Num4:     1,
+				Num6:     0,
+				Hostname: "test-host",
+			}
+
+			// Build a hostname that is longer than the Kubernetes limit.
+			// 12 characters * 21 = 252 characters. Kubernetes max is 253.
+			longHostname = strings.Repeat("long--hostna", 21)
+			Expect(len(longHostname)).To(BeNumerically("==", 252))
+			longHostname2 = fmt.Sprintf("%s-two", longHostname[:4])
+			Expect(len(longHostname)).To(BeNumerically("==", 252))
+
+			err := applyNode(bc, kc, args.Hostname, nil)
+			Expect(err).NotTo(HaveOccurred())
+			err = applyNode(bc, kc, longHostname, nil)
+			Expect(err).NotTo(HaveOccurred())
+			err = applyNode(bc, kc, longHostname2, nil)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		AfterEach(func() {
 			deleteNode(bc, kc, args.Hostname)
+			deleteNode(bc, kc, longHostname)
+			deleteNode(bc, kc, longHostname2)
+		})
+
+		It("should handle long hostnames", func() {
+			deleteAllPools()
+
+			applyPool("10.0.0.0/24", true, "")
+			applyPool("fe80:ba:ad:beef::00/120", true, "")
+			args.Hostname = longHostname
+			args.Num6 = 1
+
+			v4, v6, err := ic.AutoAssign(context.Background(), args)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(v4)).To(Equal(1))
+			Expect(len(v6)).To(Equal(1))
+
+			// The block should have an affinity to the host.
+			opts := model.BlockAffinityListOptions{Host: longHostname, IPVersion: 6}
+			affs, err := bc.List(context.Background(), opts, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(affs.KVPairs)).To(Equal(1))
+			k := affs.KVPairs[0].Key.(model.BlockAffinityKey)
+			Expect(k.Host).To(Equal(longHostname))
+
+			// It should also handle hostnames which are the same after
+			// truncation occurs. Perform the same query with a really similar
+			// hostname, with only the last few characters changed.
+			// In KDD mode, this could be a problem if we don't handle long hostnames correctly.
+
+			args.Hostname = longHostname2
+			args.Num6 = 1
+			v4, v6, err = ic.AutoAssign(context.Background(), args)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(v4)).To(Equal(1))
+			Expect(len(v6)).To(Equal(1))
+
+			// Expect two block affinities.
+			opts = model.BlockAffinityListOptions{IPVersion: 6}
+			affs, err = bc.List(context.Background(), opts, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(affs.KVPairs)).To(Equal(2))
+
+			// The block should be affine to the second host.
+			opts = model.BlockAffinityListOptions{Host: longHostname2, IPVersion: 6}
+			affs, err = bc.List(context.Background(), opts, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(affs.KVPairs)).To(Equal(1))
+			k = affs.KVPairs[0].Key.(model.BlockAffinityKey)
+			Expect(k.Host).To(Equal(longHostname2))
 		})
 
 		// Call once in order to assign an IP address and create a block.
@@ -383,15 +447,15 @@ var _ = testutils.E2eDatastoreDescribe("IPAM tests", testutils.DatastoreAll, fun
 			applyPool("10.0.0.0/24", true, "")
 			applyPool("20.0.0.0/24", true, "")
 
-			v4, _, outErr := ic.AutoAssign(context.Background(), args)
-			Expect(outErr).NotTo(HaveOccurred())
+			v4, _, err := ic.AutoAssign(context.Background(), args)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(len(v4) == 1).To(BeTrue())
 		})
 
 		// Call again to trigger an assignment from the newly created block.
 		It("should have assigned an IP address with no error", func() {
-			v4, _, outErr := ic.AutoAssign(context.Background(), args)
-			Expect(outErr).NotTo(HaveOccurred())
+			v4, _, err := ic.AutoAssign(context.Background(), args)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(len(v4)).To(Equal(1))
 		})
 	})
@@ -1367,7 +1431,7 @@ func applyPoolWithBlockSize(cidr string, enabled bool, nodeSelector string, bloc
 	ipPools.pools[cidr] = pool{enabled: enabled, nodeSelector: nodeSelector, blockSize: blockSize}
 }
 
-func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[string]string) {
+func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[string]string) error {
 	if kc != nil {
 		// If a k8s clientset was provided, create the node in Kubernetes.
 		n := corev1.Node{
@@ -1381,16 +1445,23 @@ func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[
 
 		// Create/Update the node
 		newNode, err := kc.CoreV1().Nodes().Create(&n)
-		if err != nil && kerrors.IsAlreadyExists(err) {
-			oldNode, _ := kc.CoreV1().Nodes().Get(host, metav1.GetOptions{})
-			oldNode.Labels = labels
+		if err != nil {
+			if kerrors.IsAlreadyExists(err) {
+				oldNode, _ := kc.CoreV1().Nodes().Get(host, metav1.GetOptions{})
+				oldNode.Labels = labels
 
-			newNode, _ = kc.CoreV1().Nodes().Update(oldNode)
+				newNode, err = kc.CoreV1().Nodes().Update(oldNode)
+				if err != nil {
+					return nil
+				}
+			} else {
+				return err
+			}
 		}
 		log.WithField("node", newNode).WithError(err).Info("node applied")
 	} else {
 		// Otherwise, create it in Calico.
-		c.Apply(context.Background(), &model.KVPair{
+		_, err := c.Apply(context.Background(), &model.KVPair{
 			Key: model.ResourceKey{Name: host, Kind: v3.KindNode},
 			Value: v3.Node{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
@@ -1399,7 +1470,11 @@ func applyNode(c bapi.Client, kc *kubernetes.Clientset, host string, labels map[
 				}},
 			},
 		})
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func deleteNode(c bapi.Client, kc *kubernetes.Clientset, host string) {

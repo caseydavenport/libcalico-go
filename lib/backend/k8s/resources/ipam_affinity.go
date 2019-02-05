@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"strings"
 
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
@@ -85,11 +86,32 @@ func toV1(kvpv3 *model.KVPair) *model.KVPair {
 }
 
 func v3Fields(k model.Key) (name, cidr, host string) {
-	host = k.(model.BlockAffinityKey).Host
+	// Sanitize the CIDR, replacing characters which
+	// are not allowed in the Kubernetes API.
+	// e.g., 10.0.0.1/26 -> 10-0-0-1-26
 	cidr = fmt.Sprintf("%s", k.(model.BlockAffinityKey).CIDR)
-	h := sha1.New()
-	h.Write([]byte(fmt.Sprintf("%s+%s", host, cidr)))
-	name = fmt.Sprintf("%s-%sc", host, hex.EncodeToString(h.Sum(nil))[:11])
+	cidrstr := strings.Replace(cidr, ".", "-", -1)
+	cidrstr = strings.Replace(cidrstr, ":", "-", -1)
+	cidrstr = strings.Replace(cidrstr, "/", "-", -1)
+
+	// Include the hostname as well.
+	host = k.(model.BlockAffinityKey).Host
+	name = fmt.Sprintf("%s-%s", host, cidrstr)
+
+	if len(name) >= 253 {
+		// If the name is too long, we need to shorten it.
+		// Remove enough characters to get it below the 253 character limit,
+		// as well as 11 characters to add a hash which helps with uniqueness,
+		// and two characters for the `-` separators between clauses.
+		name = fmt.Sprintf("%s-%s", host[:252-len(cidrstr)-13], cidrstr)
+
+		// Add a hash to help with uniqueness.
+		// Kubernetes requires all names to end with an alphabetic character, so
+		// append a 'c' to the end to ensure we always meet this requirement.
+		h := sha1.New()
+		h.Write([]byte(fmt.Sprintf("%s+%s", host, cidrstr)))
+		name = fmt.Sprintf("%s-%sc", name, hex.EncodeToString(h.Sum(nil))[:10])
+	}
 	return
 }
 
