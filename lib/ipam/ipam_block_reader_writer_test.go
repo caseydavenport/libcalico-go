@@ -849,6 +849,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests (kdd 
 		bc  api.Client
 		net *cnet.IPNet
 		ctx context.Context
+		rw  blockReaderWriter
 	)
 
 	BeforeEach(func() {
@@ -859,6 +860,7 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests (kdd 
 		ctx = context.Background()
 		_, net, err = cnet.ParseCIDR("10.0.0.0/26")
 		Expect(err).NotTo(HaveOccurred())
+		rw = blockReaderWriter{client: bc}
 	})
 
 	It("should respect Kubernetes UID for affinities", func() {
@@ -909,4 +911,33 @@ var _ = testutils.E2eDatastoreDescribe("IPAM affine block allocation tests (kdd 
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("should delete a block on query if the original delete failed", func() {
+		// Create a block
+		initKVP := &model.KVPair{
+			Key:   model.BlockKey{CIDR: *net},
+			Value: &model.AllocationBlock{},
+		}
+		kvpa, err := rw.client.Create(ctx, initKVP)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Override blockReaderWriter's client and fail to delete
+		rw.client = badKddClient{bc.(*k8s.KubeClient)}
+		err = rw.deleteBlock(ctx, kvpa)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("An error has occurred"))
+
+		// Try to get the block, should return not found.
+		rw.client = bc
+		_, err = rw.queryBlock(ctx, *net, "")
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("Resource was deleted"))
+	})
 })
+
+type badKddClient struct {
+	*k8s.KubeClient
+}
+
+func (c badKddClient) Delete(ctx context.Context, k model.Key, revision string) (*model.KVPair, error) {
+	return nil, fmt.Errorf("An error has occurred")
+}
