@@ -77,7 +77,6 @@ func (options IPAMHandleListOptions) KeyFromDefaultPath(path string) Key {
 }
 
 type IPAMHandle struct {
-	AtomicDelete
 	HandleID string         `json:"-"`
 	Block    map[string]int `json:"block"`
 	Deleting bool           `json:"deleting"`

@@ -86,7 +86,6 @@ func (options BlockListOptions) KeyFromDefaultPath(path string) Key {
 }
 
 type AllocationBlock struct {
-	AtomicDelete
 	CIDR           net.IPNet             `json:"cidr"`
 	Affinity       *string               `json:"affinity"`
 	StrictAffinity bool                  `json:"strictAffinity"`

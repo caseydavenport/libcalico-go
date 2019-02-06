@@ -47,7 +47,6 @@ type BlockAffinityKey struct {
 }
 
 type BlockAffinity struct {
-	AtomicDelete
 	State BlockAffinityState `json:"state"`
 }
 
