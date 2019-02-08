@@ -1,6 +1,6 @@
 package model
 
 type DeletionMarker interface {
-	MarkDelete()
+	MarkDeleted()
 	IsDeleted() bool
 }

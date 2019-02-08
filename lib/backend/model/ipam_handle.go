@@ -82,10 +82,10 @@ type IPAMHandle struct {
 	Deleting bool           `json:"deleting"`
 }
 
-func (h *IPAMHandle) SetDelete() {
+func (h *IPAMHandle) MarkDeleted() {
 	h.Deleting = true
 }
 
-func (h *IPAMHandle) GetDelete() bool {
+func (h *IPAMHandle) IsDeleted() bool {
 	return h.Deleting
 }

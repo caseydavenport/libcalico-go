@@ -100,11 +100,11 @@ type AllocationBlock struct {
 	HostAffinity *string `json:"hostAffinity,omitempty"`
 }
 
-func (b *AllocationBlock) SetDelete() {
+func (b *AllocationBlock) MarkDeleted() {
 	b.Deleting = true
 }
 
-func (b *AllocationBlock) GetDelete() bool {
+func (b *AllocationBlock) IsDeleted() bool {
 	return b.Deleting
 }
 

@@ -50,11 +50,11 @@ type BlockAffinity struct {
 	State BlockAffinityState `json:"state"`
 }
 
-func (b *BlockAffinity) SetDelete() {
+func (b *BlockAffinity) MarkDeleted() {
 	b.State = StateDeleted
 }
 
-func (b *BlockAffinity) GetDelete() bool {
+func (b *BlockAffinity) IsDeleted() bool {
 	return b.State == StateDeleted
 }
 
