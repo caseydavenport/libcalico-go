@@ -18,12 +18,12 @@ import (
 	"context"
 	"fmt"
 	"reflect"
-	"strings"
 
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
+	"github.com/projectcalico/libcalico-go/lib/names"
 	"github.com/projectcalico/libcalico-go/lib/net"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,7 +57,11 @@ func NewIPAMBlockClient(c *kubernetes.Clientset, r *rest.RESTClient) K8sResource
 	return &ipamBlockClient{rc: rc}
 }
 
-// Implements the api.Client interface for IPAMBlocks.
+// ipamBlockClient implements the api.Client interface for IPAMBlocks. It handles the translation between
+// v1 objects understood by the IPAM codebase in lib/ipam, and the CRDs which are used
+// to actually store the data in the Kubernetes API.
+// It uses a customK8sResourceClient under the covers to perform CRUD operations on
+// kubernetes CRDs.
 type ipamBlockClient struct {
 	rc customK8sResourceClient
 }
@@ -109,19 +113,14 @@ func (c ipamBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
 	}, nil
 }
 
-func (c ipamBlockClient) v3Fields(k model.Key) (name, cidr string) {
-	// Name is calculated using the CIDR, replacing characters which
-	// are not allowed in the Kubernetes API.
-	// e.g., 10.0.0.1/26 -> 10-0-0-1-26
+func (c ipamBlockClient) parseKey(k model.Key) (name, cidr string) {
 	cidr = fmt.Sprintf("%s", k.(model.BlockKey).CIDR)
-	name = strings.Replace(cidr, ".", "-", -1)
-	name = strings.Replace(name, ":", "-", -1)
-	name = strings.Replace(name, "/", "-", -1)
+	name = names.CIDRToName(k.(model.BlockKey).CIDR)
 	return
 }
 
 func (c ipamBlockClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
-	name, cidr := c.v3Fields(kvpv1.Key)
+	name, cidr := c.parseKey(kvpv1.Key)
 
 	ab := kvpv1.Value.(*model.AllocationBlock)
 
@@ -202,7 +201,7 @@ func (c *ipamBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*model
 }
 
 func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
-	name, _ := c.v3Fields(key)
+	name, _ := c.parseKey(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindIPAMBlock,
@@ -219,7 +218,7 @@ func (c *ipamBlockClient) Delete(ctx context.Context, key model.Key, revision st
 }
 
 func (c *ipamBlockClient) Get(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
-	name, _ := c.v3Fields(key)
+	name, _ := c.parseKey(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindIPAMBlock,

@@ -210,7 +210,7 @@ func NewKubeClient(ca *apiconfig.CalicoAPIConfigSpec) (api.Client, error) {
 		reflect.TypeOf(model.BlockAffinityKey{}),
 		reflect.TypeOf(model.BlockAffinityListOptions{}),
 		apiv3.KindBlockAffinity,
-		resources.NewAffinityBlockClient(cs, crdClientV1),
+		resources.NewBlockAffinityClient(cs, crdClientV1),
 	)
 	kubeClient.registerResourceClient(
 		reflect.TypeOf(model.BlockKey{}),

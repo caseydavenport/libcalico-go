@@ -35,7 +35,11 @@ func NewIPAMConfigClient(c *kubernetes.Clientset, r *rest.RESTClient) K8sResourc
 	return &ipamConfigClient{}
 }
 
-// Implements the api.Client interface for IPAMConfig.
+// ipamConfigClient implements the api.Client interface for IPAMConfig objects. It
+// handles the translation between v1 objects understood by the IPAM codebase in lib/ipam,
+// and the CRDs which are used to actually store the data in the Kubernetes API.
+// It uses a customK8sResourceClient under the covers to perform CRUD operations on
+// kubernetes CRDs.
 type ipamConfigClient struct {
 	rc customK8sResourceClient
 }

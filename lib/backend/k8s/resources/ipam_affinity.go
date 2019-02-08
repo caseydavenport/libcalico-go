@@ -16,16 +16,16 @@ package resources
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"reflect"
-	"strings"
 
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
 	cerrors "github.com/projectcalico/libcalico-go/lib/errors"
+	"github.com/projectcalico/libcalico-go/lib/names"
 	"github.com/projectcalico/libcalico-go/lib/net"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,7 +39,7 @@ const (
 	BlockAffinityCRDName      = "blockaffinities.crd.projectcalico.org"
 )
 
-func NewAffinityBlockClient(c *kubernetes.Clientset, r *rest.RESTClient) K8sResourceClient {
+func NewBlockAffinityClient(c *kubernetes.Clientset, r *rest.RESTClient) K8sResourceClient {
 	// Create a resource client which manages k8s CRDs.
 	rc := customK8sResourceClient{
 		clientSet:       c,
@@ -59,15 +59,20 @@ func NewAffinityBlockClient(c *kubernetes.Clientset, r *rest.RESTClient) K8sReso
 	return &affinityBlockClient{rc: rc}
 }
 
-// Implements the api.Client interface for AffinityBlocks.
+// affinityBlockClient implements the api.Client interface for BlockAffinity objects. It
+// handles the translation between v1 objects understood by the IPAM codebase in lib/ipam,
+// and the CRDs which are used to actually store the data in the Kubernetes API.
+// It uses a customK8sResourceClient under the covers to perform CRUD operations on
+// kubernetes CRDs.
 type affinityBlockClient struct {
 	rc customK8sResourceClient
 }
 
+// toV1 converts the given v3 CRD KVPair into a v1 model representation
+// which can be passed to the IPAM code.
 func (c affinityBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
-	cidrStr := kvpv3.Value.(*apiv3.BlockAffinity).Annotations["projectcalico.org/cidr"]
-	host := kvpv3.Value.(*apiv3.BlockAffinity).Annotations["projectcalico.org/host"]
-	_, cidr, err := net.ParseCIDR(cidrStr)
+	// Parse the CIDR into a struct.
+	_, cidr, err := net.ParseCIDR(kvpv3.Value.(*apiv3.BlockAffinity).Spec.CIDR)
 	if err != nil {
 		log.WithField("cidr", cidr).WithError(err).Error("failed to parse cidr")
 		return nil, err
@@ -75,8 +80,8 @@ func (c affinityBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
 	state := model.BlockAffinityState(kvpv3.Value.(*apiv3.BlockAffinity).Spec.State)
 	return &model.KVPair{
 		Key: model.BlockAffinityKey{
-			Host: host,
 			CIDR: *cidr,
+			Host: kvpv3.Value.(*apiv3.BlockAffinity).Spec.Node,
 			UID:  &kvpv3.Value.(*apiv3.BlockAffinity).UID,
 		},
 		Value: &model.BlockAffinity{
@@ -86,39 +91,38 @@ func (c affinityBlockClient) toV1(kvpv3 *model.KVPair) (*model.KVPair, error) {
 	}, nil
 }
 
-func (c affinityBlockClient) v3Fields(k model.Key) (name, cidr, host string) {
-	// Sanitize the CIDR, replacing characters which
-	// are not allowed in the Kubernetes API.
-	// e.g., 10.0.0.1/26 -> 10-0-0-1-26
+// parseKey parses the given model.Key, returning a suitable name, CIDR
+// and host for use in the Kubernetes API.
+func (c affinityBlockClient) parseKey(k model.Key) (name, cidr, host string) {
 	host = k.(model.BlockAffinityKey).Host
 	cidr = fmt.Sprintf("%s", k.(model.BlockAffinityKey).CIDR)
-	cidrstr := strings.Replace(cidr, ".", "-", -1)
-	cidrstr = strings.Replace(cidrstr, ":", "-", -1)
-	cidrstr = strings.Replace(cidrstr, "/", "-", -1)
+	cidrname := names.CIDRToName(k.(model.BlockAffinityKey).CIDR)
 
 	// Include the hostname as well.
 	host = k.(model.BlockAffinityKey).Host
-	name = fmt.Sprintf("%s-%s", host, cidrstr)
+	name = fmt.Sprintf("%s-%s", host, cidrname)
 
 	if len(name) >= 253 {
 		// If the name is too long, we need to shorten it.
 		// Remove enough characters to get it below the 253 character limit,
 		// as well as 11 characters to add a hash which helps with uniqueness,
 		// and two characters for the `-` separators between clauses.
-		name = fmt.Sprintf("%s-%s", host[:252-len(cidrstr)-13], cidrstr)
+		name = fmt.Sprintf("%s-%s", host[:252-len(cidrname)-13], cidrname)
 
 		// Add a hash to help with uniqueness.
 		// Kubernetes requires all names to end with an alphabetic character, so
 		// append a 'c' to the end to ensure we always meet this requirement.
-		h := sha1.New()
-		h.Write([]byte(fmt.Sprintf("%s+%s", host, cidrstr)))
+		h := sha256.New()
+		h.Write([]byte(fmt.Sprintf("%s+%s", host, cidrname)))
 		name = fmt.Sprintf("%s-%sc", name, hex.EncodeToString(h.Sum(nil))[:10])
 	}
 	return
 }
 
+// toV3 takes the given v1 KVPair and converts it into a v3 representation, suitable
+// for writing as a CRD to the Kubernetes API.
 func (c affinityBlockClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
-	name, cidr, host := c.v3Fields(kvpv1.Key)
+	name, cidr, host := c.parseKey(kvpv1.Key)
 	state := kvpv1.Value.(*model.BlockAffinity).State
 	return &model.KVPair{
 		Key: model.ResourceKey{
@@ -133,13 +137,11 @@ func (c affinityBlockClient) toV3(kvpv1 *model.KVPair) *model.KVPair {
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            name,
 				ResourceVersion: kvpv1.Revision,
-				Annotations: map[string]string{
-					"projectcalico.org/host": host,
-					"projectcalico.org/cidr": cidr,
-				},
 			},
 			Spec: apiv3.BlockAffinitySpec{
 				State: string(state),
+				Node:  host,
+				CIDR:  cidr,
 			},
 		},
 		Revision: kvpv1.Revision,
@@ -173,7 +175,7 @@ func (c *affinityBlockClient) Update(ctx context.Context, kvp *model.KVPair) (*m
 }
 
 func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revision string, uid *types.UID) (*model.KVPair, error) {
-	name, _, _ := c.v3Fields(key)
+	name, _, _ := c.parseKey(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindBlockAffinity,
@@ -190,7 +192,7 @@ func (c *affinityBlockClient) Delete(ctx context.Context, key model.Key, revisio
 }
 
 func (c *affinityBlockClient) Get(ctx context.Context, key model.Key, revision string) (*model.KVPair, error) {
-	name, _, _ := c.v3Fields(key)
+	name, _, _ := c.parseKey(key)
 	k := model.ResourceKey{
 		Name: name,
 		Kind: apiv3.KindBlockAffinity,
@@ -235,7 +237,7 @@ func (c *affinityBlockClient) List(ctx context.Context, list model.ListInterface
 }
 
 func (c *affinityBlockClient) Watch(ctx context.Context, list model.ListInterface, revision string) (api.WatchInterface, error) {
-	log.Warn("Operation Watch is not supported on AffinityBlock type")
+	log.Warn("Operation Watch is not supported on BlockAffinity type")
 	return nil, cerrors.ErrorOperationNotSupported{
 		Identifier: list,
 		Operation:  "Watch",
