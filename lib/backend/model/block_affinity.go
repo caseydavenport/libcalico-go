@@ -50,6 +50,14 @@ type BlockAffinity struct {
 	State BlockAffinityState `json:"state"`
 }
 
+func (b *BlockAffinity) MarkDeleted() {
+	b.State = StateDeleted
+}
+
+func (b *BlockAffinity) IsDeleted() bool {
+	return b.State == StateDeleted
+}
+
 func (key BlockAffinityKey) defaultPath() (string, error) {
 	if key.CIDR.IP == nil || key.Host == "" {
 		return "", errors.ErrorInsufficientIdentifiers{}

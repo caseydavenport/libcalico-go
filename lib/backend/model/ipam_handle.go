@@ -79,4 +79,13 @@ func (options IPAMHandleListOptions) KeyFromDefaultPath(path string) Key {
 type IPAMHandle struct {
 	HandleID string         `json:"-"`
 	Block    map[string]int `json:"block"`
+	Deleting bool           `json:"deleting"`
+}
+
+func (h *IPAMHandle) MarkDeleted() {
+	h.Deleting = true
+}
+
+func (h *IPAMHandle) IsDeleted() bool {
+	return h.Deleting
 }

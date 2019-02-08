@@ -100,6 +100,14 @@ type AllocationBlock struct {
 	HostAffinity *string `json:"hostAffinity,omitempty"`
 }
 
+func (b *AllocationBlock) MarkDeleted() {
+	b.Deleting = true
+}
+
+func (b *AllocationBlock) IsDeleted() bool {
+	return b.Deleting
+}
+
 type AllocationAttribute struct {
 	AttrPrimary   *string           `json:"handle_id"`
 	AttrSecondary map[string]string `json:"secondary"`
