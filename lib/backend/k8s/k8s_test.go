@@ -31,6 +31,7 @@ import (
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend/api"
 	"github.com/projectcalico/libcalico-go/lib/backend/model"
+	"github.com/projectcalico/libcalico-go/lib/net"
 	"github.com/projectcalico/libcalico-go/lib/numorstring"
 
 	k8sapi "k8s.io/api/core/v1"
@@ -1807,20 +1808,14 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 			Expect(err).NotTo(HaveOccurred())
 
 			// We should get at least one event from the watch.
-			var receivedEvent bool
-			for i := 0; i < 10; i++ {
-				select {
-				case e := <-watch.ResultChan():
-					// Got an event. Check it's OK.
-					Expect(e.Error).NotTo(HaveOccurred())
-					Expect(e.Type).To(Equal(api.WatchAdded))
-					receivedEvent = true
-					break
-				default:
-					time.Sleep(50 * time.Millisecond)
-				}
+			select {
+			case e := <-watch.ResultChan():
+				// Got an event. Check it's OK.
+				Expect(e.Error).NotTo(HaveOccurred())
+				Expect(e.Type).To(Equal(api.WatchAdded))
+			case <-time.After(time.Second):
+				Fail("Never received a watch event")
 			}
-			Expect(receivedEvent).To(BeTrue(), "Did not receive watch event")
 		})
 
 		By("Watching all nodes", func() {
@@ -1828,20 +1823,43 @@ var _ = testutils.E2eDatastoreDescribe("Test Watch support", testutils.Datastore
 			Expect(err).NotTo(HaveOccurred())
 
 			// We should get at least one event from the watch.
-			var receivedEvent bool
-			for i := 0; i < 10; i++ {
-				select {
-				case e := <-watch.ResultChan():
-					// Got an event. Check it's OK.
-					Expect(e.Error).NotTo(HaveOccurred())
-					Expect(e.Type).To(Equal(api.WatchAdded))
-					receivedEvent = true
-					break
-				default:
-					time.Sleep(50 * time.Millisecond)
-				}
+			select {
+			case e := <-watch.ResultChan():
+				// Got an event. Check it's OK.
+				Expect(e.Error).NotTo(HaveOccurred())
+				Expect(e.Type).To(Equal(api.WatchAdded))
+			case <-time.After(time.Second):
+				Fail("Never received a watch event")
 			}
-			Expect(receivedEvent).To(BeTrue(), "Did not receive watch event")
+		})
+	})
+
+	It("it should support watching Block Affinities", func() {
+		By("Watching a block affinity for host-a", func() {
+			host := "host-a"
+			watch, err := c.Watch(ctx, model.BlockAffinityListOptions{Host: host}, "")
+			Expect(err).NotTo(HaveOccurred())
+
+			go func() {
+				_, err := c.Create(ctx, &model.KVPair{
+					Key: model.BlockAffinityKey{
+						CIDR: net.MustParseCIDR("10.0.0.0/26"),
+						Host: host,
+					},
+					Value: &model.BlockAffinity{State: model.StatePending},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}()
+
+			// We should get at least one event from the watch.
+			select {
+			case e := <-watch.ResultChan():
+				// Got an event. Check it's OK.
+				Expect(e.Error).NotTo(HaveOccurred())
+				Expect(e.Type).To(Equal(api.WatchAdded))
+			case <-time.After(time.Second):
+				Fail("Never received a watch event")
+			}
 		})
 	})
 })
