@@ -110,9 +110,11 @@ func NewKubeClient(ca *apiconfig.CalicoAPIConfigSpec) (api.Client, error) {
 		return nil, resources.K8sErrorToCalico(err, nil)
 	}
 
-	// Create the clientset
+	// Create the clientset. We increase the QPS so that the IPAM code performs
+	// efficiently. The IPAM code can create bursts of requests to the API, so
+	// in order to keep pod creation times sensible we allow a higher request rate.
 	config.QPS = float32(500)
-	config.Burst = 500
+	config.Burst = 1000
 	cs, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, resources.K8sErrorToCalico(err, nil)
