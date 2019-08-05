@@ -45,6 +45,14 @@ type BGPConfigurationSpec struct {
 	NodeToNodeMeshEnabled *bool `json:"nodeToNodeMeshEnabled,omitempty" validate:"omitempty" confignamev1:"node_mesh"`
 	// ASNumber is the default AS number used by a node. [Default: 64512]
 	ASNumber *numorstring.ASNumber `json:"asNumber,omitempty" validate:"omitempty" confignamev1:"as_num"`
+	// Configuration for Kubernetes service advertisement.
+	Services *ServiceSpec `json:"services,omitempty"`
+}
+
+type ServiceSpec struct {
+	// ClusterCIDRs is a list of CIDRs for Service cluster IPs in the cluster to advertise. If present, then Calico will advertise
+	// these ranges from each node in the cluster. This field supports a maximum of one CIDR.
+	ClusterIPCIDRs []string `json:"clusterCIDRs,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

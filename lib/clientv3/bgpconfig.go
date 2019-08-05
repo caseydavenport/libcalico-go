@@ -116,19 +116,33 @@ func (r bgpConfigurations) Watch(ctx context.Context, opts options.ListOptions) 
 func (r bgpConfigurations) ValidateDefaultOnlyFields(res *apiv3.BGPConfiguration) error {
 	errFields := []cerrors.ErroredField{}
 	if res.ObjectMeta.GetName() != "default" {
+		if res.Spec.Services != nil {
+			errFields = append(errFields, cerrors.ErroredField{
+				Name:   "BGPConfiguration.Spec.Services",
+				Reason: "Cannot configure Kubernetes services on a non-default BGP configuration",
+			})
+		}
+
 		if res.Spec.NodeToNodeMeshEnabled != nil {
 			errFields = append(errFields, cerrors.ErroredField{
 				Name:   "BGPConfiguration.Spec.NodeToNodeMeshEnabled",
-				Reason: "Cannot set nodeToNodeMeshEnabled on a non default BGP Configuration.",
+				Reason: "Cannot set nodeToNodeMeshEnabled on a non-default BGP configuration.",
 			})
 		}
 
 		if res.Spec.ASNumber != nil {
 			errFields = append(errFields, cerrors.ErroredField{
 				Name:   "BGPConfiguration.Spec.ASNumber",
-				Reason: "Cannot set ASNumber on a non default BGP Configuration.",
+				Reason: "Cannot set ASNumber on a non-default BGP configuration.",
 			})
 		}
+	}
+
+	if res.Spec.Services != nil && len(res.Spec.Services.ClusterIPCIDRs) > 1 {
+		errFields = append(errFields, cerrors.ErroredField{
+			Name:   "BGPConfiguration.Spec.Services.ClusterCIDRs",
+			Reason: "Cannot configure more than one Kubernetes service CIDR range",
+		})
 	}
 
 	if len(errFields) > 0 {

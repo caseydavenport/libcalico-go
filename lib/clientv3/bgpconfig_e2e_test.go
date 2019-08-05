@@ -26,6 +26,7 @@ import (
 
 	"github.com/projectcalico/libcalico-go/lib/apiconfig"
 	apiv3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
+	v3 "github.com/projectcalico/libcalico-go/lib/apis/v3"
 	"github.com/projectcalico/libcalico-go/lib/backend"
 	"github.com/projectcalico/libcalico-go/lib/clientv3"
 	"github.com/projectcalico/libcalico-go/lib/numorstring"
@@ -48,6 +49,7 @@ var _ = testutils.E2eDatastoreDescribe("BGPConfiguration tests", testutils.Datas
 		LogSeverityScreen:     "Info",
 		NodeToNodeMeshEnabled: &ptrTrue,
 		ASNumber:              &nodeASNumber1,
+		Services:              &v3.ServiceSpec{ClusterIPCIDRs: []string{"10.0.0.0/16"}},
 	}
 	specDefault2 := apiv3.BGPConfigurationSpec{
 		LogSeverityScreen:     "Warning",
