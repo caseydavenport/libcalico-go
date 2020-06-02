@@ -164,6 +164,9 @@ run-etcd: stop-etcd
 	--advertise-client-urls "http://$(LOCAL_IP_ENV):2379,http://127.0.0.1:2379,http://$(LOCAL_IP_ENV):4001,http://127.0.0.1:4001" \
 	--listen-client-urls "http://0.0.0.0:2379,http://0.0.0.0:4001"
 
+# Override version to one that fails temporarily.
+K8S_VERSION:=v1.18.3
+
 ## Run a local kubernetes master with API via hyperkube
 run-kubernetes-master: stop-kubernetes-master
 	# Run a Kubernetes apiserver using Docker.
